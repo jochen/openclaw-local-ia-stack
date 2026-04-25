@@ -18,6 +18,7 @@ services:
     environment:
       - NCCL_P2P_DISABLE=0
       - NCCL_IB_DISABLE=1
+      - OMP_NUM_THREADS=4
     command:
       - --model=${VLLM_MODEL}
       - --served-model-name
