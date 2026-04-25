@@ -1,0 +1,148 @@
+name: ai-stack
+
+services:
+
+  # ── LLM Server (vLLM) ────────────────────────────────────────────────────────
+  llm:
+    image: docker.io/vllm/vllm-openai:cu129-nightly
+    container_name: llm
+    devices:
+      - nvidia.com/gpu=all
+    security_opt:
+      - label=disable
+    ports:
+      - "11434:8000"
+    volumes:
+      - ${HF_CACHE}:/root/.cache/huggingface
+    environment:
+      - NCCL_P2P_DISABLE=0
+      - NCCL_IB_DISABLE=1
+    command:
+      - --model=${VLLM_MODEL}
+      - --served-model-name=current,vision
+      - --pipeline-parallel-size=2
+      - --quantization=${VLLM_QUANTIZATION}
+      - --max-model-len=${VLLM_MAX_CTX}
+      - --port=8000
+      - --trust-remote-code
+    shm_size: '2gb'
+    restart: unless-stopped
+
+  # ── Embeddings (infinity-emb) ─────────────────────────────────────────────────
+  embeddings:
+    image: docker.io/michaelf34/infinity:latest
+    container_name: embeddings
+    ports:
+      - "11435:7997"
+    volumes:
+      - ${HF_CACHE}:/app/.cache/huggingface
+    command:
+      - v2
+      - --model-name-or-path=nomic-ai/nomic-embed-text-v1.5
+      - --port=7997
+    restart: unless-stopped
+
+  # ── Speech AI ────────────────────────────────────────────────────────────────
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    container_name: speaches
+    devices:
+      - nvidia.com/gpu=all
+    security_opt:
+      - label=disable
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${HF_CACHE}:/root/.cache/huggingface
+      - ./scripts/speaches-entrypoint.sh:/speaches-entrypoint.sh:ro
+    entrypoint: ["/speaches-entrypoint.sh"]
+    command: ["uvicorn", "--factory", "speaches.main:create_app"]
+    restart: unless-stopped
+
+  # ── Honcho ───────────────────────────────────────────────────────────────────
+  honcho-api:
+    build:
+      context: ../honcho-fork
+      dockerfile: Dockerfile
+    container_name: honcho-api
+    entrypoint: ["sh", "docker/entrypoint.sh"]
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      llm:
+        condition: service_started
+    ports:
+      - "9000:8000"
+    env_file:
+      - ../honcho-fork/.env
+    environment:
+      - DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@database:5432/postgres
+      - CACHE_URL=redis://redis:6379/0?suppress=true
+      - CACHE_ENABLED=true
+    restart: unless-stopped
+
+  honcho-deriver:
+    build:
+      context: ../honcho-fork
+      dockerfile: Dockerfile
+    container_name: honcho-deriver
+    entrypoint: ["/app/.venv/bin/python", "-m", "src.deriver"]
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      llm:
+        condition: service_started
+    env_file:
+      - ../honcho-fork/.env
+    environment:
+      - DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@database:5432/postgres
+      - CACHE_URL=redis://redis:6379/0?suppress=true
+      - CACHE_ENABLED=true
+    restart: unless-stopped
+
+  # ── Infrastructure ───────────────────────────────────────────────────────────
+  database:
+    image: docker.io/pgvector/pgvector:pg15
+    container_name: honcho-db
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    command: ["postgres", "-c", "max_connections=200"]
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data/
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: docker.io/redis:8.2
+    container_name: honcho-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+    external: true
+    name: honcho_pgdata
+  redis-data:
+    external: true
+    name: honcho_redis-data
