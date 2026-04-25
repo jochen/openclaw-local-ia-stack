@@ -16,18 +16,9 @@ if [ -z "$MODEL" ]; then
     exit 1
 fi
 
-# Quantisierung aus Modellname ableiten
-QUANT="none"
-if echo "$MODEL" | grep -qi "awq"; then
-    QUANT="awq"
-elif echo "$MODEL" | grep -qi "gptq"; then
-    QUANT="gptq"
-fi
-
 # .env aktualisieren
 sed -i "s|^VLLM_MODEL=.*|VLLM_MODEL=$MODEL|" "$ENV_FILE"
-sed -i "s|^VLLM_QUANTIZATION=.*|VLLM_QUANTIZATION=$QUANT|" "$ENV_FILE"
 
-echo "Switching to: $MODEL (quantization: $QUANT)"
+echo "Switching to: $MODEL (quantization: auto-detected by vLLM)"
 ~/.local/bin/podman-compose -f "$SCRIPT_DIR/../compose.yml" up -d --force-recreate llm
 echo "✓ vLLM neu gestartet — erstes Request triggert Model-Load aus HF Cache"

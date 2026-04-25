@@ -19,9 +19,11 @@ services:
       - NCCL_IB_DISABLE=1
     command:
       - --model=${VLLM_MODEL}
-      - --served-model-name=current,vision
+      - --served-model-name
+      - current
+      - vision
       - --pipeline-parallel-size=2
-      - --quantization=${VLLM_QUANTIZATION}
+      # quantization is auto-detected from model config
       - --max-model-len=${VLLM_MAX_CTX}
       - --port=8000
       - --trust-remote-code
@@ -38,7 +40,7 @@ services:
       - ${HF_CACHE}:/app/.cache/huggingface
     command:
       - v2
-      - --model-name-or-path=nomic-ai/nomic-embed-text-v1.5
+      - --model-id=nomic-ai/nomic-embed-text-v1.5
       - --port=7997
     restart: unless-stopped
 
