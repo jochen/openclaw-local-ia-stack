@@ -14,6 +14,7 @@ services:
       - "11434:8000"
     volumes:
       - ${HF_CACHE}:/root/.cache/huggingface
+      - vllm-cache:/root/.cache/vllm
     environment:
       - NCCL_P2P_DISABLE=0
       - NCCL_IB_DISABLE=1
@@ -143,6 +144,7 @@ services:
       retries: 5
 
 volumes:
+  vllm-cache:
   pgdata:
     external: true
     name: honcho_pgdata
