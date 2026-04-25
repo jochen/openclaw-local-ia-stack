@@ -42,6 +42,7 @@ services:
       - v2
       - --model-id=nomic-ai/nomic-embed-text-v1.5
       - --port=7997
+      - --url-prefix=/v1
     restart: unless-stopped
 
   # ── Speech AI ────────────────────────────────────────────────────────────────
