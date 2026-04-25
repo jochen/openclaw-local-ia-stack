@@ -19,12 +19,13 @@ services:
       - NCCL_P2P_DISABLE=0
       - NCCL_IB_DISABLE=1
       - OMP_NUM_THREADS=4
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     command:
       - --model=${VLLM_MODEL}
       - --served-model-name
       - current
       - vision
-      - --pipeline-parallel-size=2
+      - --tensor-parallel-size=2
       # quantization is auto-detected from model config
       - --max-model-len=${VLLM_MAX_CTX}
       - --port=8000
