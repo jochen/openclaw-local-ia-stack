@@ -1,5 +1,12 @@
 # Implementation Plan 1: lms (LM Studio CLI) in Podman
 
+> **Status: SUPERSEDED.** `lms server start` requires the LM Studio desktop daemon and
+> cannot run headlessly (see Step 1 / DECISIONS.md → "Why lms was not used").
+> The stack now uses `ghcr.io/ggml-org/llama.cpp:server-cuda` with `--split-mode layer`
+> for pipeline parallelism. This document is kept as historical context.
+
+---
+
 ## Context
 
 After evaluating Ollama (too slow on PCIe multi-GPU) and vLLM (OOM due to eager
@@ -211,8 +218,9 @@ LLAMA_MODEL=lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf
 
 ## Step 6: Update honcho-fork/.env LLM URLs
 
-Change all `http://llm:8000/v1` → `http://llm:11434/v1` in `honcho-fork/.env`.
-(The embeddings URL `http://embeddings:11435/v1` stays unchanged.)
+Change all `http://llm:8000/v1` → `http://llm:11434/v1` in `honcho-fork/.env`. ✅ Done.
+The embeddings URL must use the **container-internal** port `7997`, not the host-mapped
+port `11435`: `http://embeddings:7997/v1`. ✅ Fixed.
 
 ---
 

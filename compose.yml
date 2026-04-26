@@ -32,6 +32,12 @@ services:
       - --parallel
       - "2"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # ── Embeddings (infinity-emb) ─────────────────────────────────────────────────
   embeddings:

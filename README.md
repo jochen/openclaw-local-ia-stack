@@ -193,6 +193,26 @@ podman compose up -d honcho-api honcho-deriver
 ~24.7 GB / 32 GB VRAM genutzt wenn Modell geladen
 ```
 
+## Honcho + thinking models (Qwen3)
+
+Qwen3 reasoning models generate internal `<think>…</think>` tokens before every response. Without suppression, these consume honcho's entire `max_tokens` budget, leaving empty content — the deriver produces no observations and the summarizer falls back to stub text.
+
+`honcho-fork/.env` disables thinking for deriver and summarizer calls:
+
+```
+DERIVER_MODEL_CONFIG__THINKING_EFFORT=none
+SUMMARY_MODEL_CONFIG__THINKING_EFFORT=none
+```
+
+This translates to `chat_template_kwargs: {"enable_thinking": false}` in the llama.cpp request (via `extra_body`), which inserts the Qwen3 `<|nothink|>` token. The standard `reasoning_effort: "none"` OpenAI parameter is **not** honored by llama.cpp for Qwen3 — see `DECISIONS.md` for the full diagnosis.
+
+**Switching models:**
+- **Non-thinking model** (Qwen2.5, Llama 3, Mistral, …): setting is silently ignored by llama.cpp, leave it as-is
+- **Another thinking model** (DeepSeek-R1, future Qwen releases): same mechanism works
+- **Real OpenAI API** (o1/o3): would require a different approach — not relevant for this local stack
+
+---
+
 ## Related repositories
 
 - [honcho-fork](https://github.com/jochen/honcho) — Local fork of plastic-labs/honcho with dimension patches

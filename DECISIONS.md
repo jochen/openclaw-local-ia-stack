@@ -245,6 +245,69 @@ speaches uses ~200 MB VRAM — negligible compared to the LLM.
 
 ---
 
+## Qwen3 thinking mode breaks honcho deriver and summarizer
+
+Qwen3.5-35B-A3B is a reasoning model. It generates `<think>...</think>` tokens
+before every response. These thinking tokens count toward the `max_tokens` budget
+in the llama.cpp API.
+
+Honcho's deriver and summarizer use small token budgets (`DEFAULT_MAX_TOKENS=2500`,
+`MAX_TOKENS_SHORT=1000`) sized for fast, focused output — not for reasoning chains.
+The model was spending the entire budget on thinking and returning empty content,
+causing:
+
+```
+ERROR - ❌ Repair failed: Expecting value: line 1 column 1 (char 0)
+ERROR - Generated summary is empty (finish_reasons=['length'])
+```
+
+### What doesn't work
+
+**`reasoning_effort: "none"`** (standard OpenAI API parameter): llama.cpp silently
+ignores this for Qwen3. The model continues to think. Verified by direct API test:
+`content` was empty, `reasoning_content` contained the full thinking trace.
+
+### What works
+
+**`chat_template_kwargs: {"enable_thinking": false}`** in the request body: llama.cpp
+maps this to the Qwen3 `<|nothink|>` token in the chat template, fully suppressing
+thinking before generation starts. Verified: content returned immediately, no
+`reasoning_content`.
+
+### Implementation
+
+The OpenAI client SDK rejects unknown top-level parameters. `chat_template_kwargs`
+must be passed via `extra_body` (which the SDK forwards to the JSON body without
+validation):
+
+```python
+await client.chat.completions.create(**params, extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+```
+
+This is wired in `honcho-fork/src/llm/backends/openai.py`: when `thinking_effort == "none"`,
+`_build_params` sets a `_extra_body` sentinel instead of `reasoning_effort`, which the
+caller pops and passes as `extra_body`.
+
+Activated in `honcho-fork/.env` via:
+```
+DERIVER_MODEL_CONFIG__THINKING_EFFORT=none
+SUMMARY_MODEL_CONFIG__THINKING_EFFORT=none
+```
+
+### Model compatibility
+
+| Model type | Effect of `enable_thinking: false` |
+|------------|-------------------------------------|
+| Qwen3 family (thinking models) | Thinking suppressed — correct behavior |
+| Qwen2.5, Llama 3, Mistral, etc. | Silently ignored by llama.cpp — no effect |
+| DeepSeek-R1 via llama.cpp | Also supported via same mechanism |
+| Real OpenAI o1/o3 API | Would break — but we use local llama.cpp only |
+
+If the active model is switched to a non-thinking model, the setting is harmless
+and can be left as-is.
+
+---
+
 ## speaches: Blackwell PTX JIT and CUDA cache
 
 The speaches image (`latest-cuda`) was built with CUDA 12.6 and does not include
