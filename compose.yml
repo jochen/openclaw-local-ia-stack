@@ -2,27 +2,35 @@ name: ai-stack
 
 services:
 
-  # ── LLM Server (llama-server) ────────────────────────────────────────────────
+  # ── LLM Server (llama-server / llama.cpp) ────────────────────────────────────
   llm:
-    image: ghcr.io/ggerganov/llama.cpp:server-cuda
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: llm
     devices:
       - nvidia.com/gpu=all
     security_opt:
       - label=disable
     ports:
-      - "11434:8080"
+      - "11434:11434"
     volumes:
       - ${LMSTUDIO_MODELS}:/models:ro
     command:
-      - --model=${LLAMA_MODEL}
-      - --alias=current
-      - --n-gpu-layers=99
-      - --split-mode=layer
-      - --ctx-size=${LLAMA_CTX}
-      - --host=0.0.0.0
-      - --port=8080
-      - --parallel=2
+      - --model
+      - ${LLAMA_MODEL}
+      - --alias
+      - current
+      - --n-gpu-layers
+      - "99"
+      - --split-mode
+      - layer
+      - --ctx-size
+      - "${LLAMA_CTX}"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "11434"
+      - --parallel
+      - "2"
     restart: unless-stopped
 
   # ── Embeddings (infinity-emb) ─────────────────────────────────────────────────
@@ -50,12 +58,43 @@ services:
       - label=disable
     ports:
       - "8000:8000"
+    environment:
+      - WHISPER__INFERENCE_DEVICE=cuda
+      - WHISPER__COMPUTE_TYPE=int8
+      - CUDA_CACHE_PATH=/home/ubuntu/.cache/cuda
     volumes:
-      - ${HF_CACHE}:/root/.cache/huggingface
+      - speaches-cache:/home/ubuntu/.cache/huggingface/hub
+      - speaches-cuda-cache:/home/ubuntu/.cache/cuda
       - ./scripts/speaches-entrypoint.sh:/speaches-entrypoint.sh:ro
     entrypoint: ["/speaches-entrypoint.sh"]
     command: ["uvicorn", "--factory", "speaches.main:create_app"]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  speaches-warmup:
+    image: alpine
+    container_name: speaches-warmup
+    depends_on:
+      speaches:
+        condition: service_healthy
+    environment:
+      - STT_MODEL=guillaumekln/faster-whisper-medium
+      - TTS_MODEL=speaches-ai/piper-de_DE-thorsten-medium
+    command:
+      - sh
+      - -c
+      - |
+        echo "Loading STT: $STT_MODEL"
+        wget -qO- --post-data='' "http://speaches:8000/v1/models/$STT_MODEL"
+        echo "Loading TTS: $TTS_MODEL"
+        wget -qO- --post-data='' "http://speaches:8000/v1/models/$TTS_MODEL"
+        echo "Speaches models ready."
+    restart: "no"
 
   # ── Honcho ───────────────────────────────────────────────────────────────────
   honcho-api:
@@ -144,3 +183,7 @@ volumes:
   redis-data:
     external: true
     name: honcho_redis-data
+  speaches-cache:
+    external: true
+    name: speaches-cache
+  speaches-cuda-cache:

@@ -129,8 +129,6 @@ These patches live in [jochen/honcho](https://github.com/jochen/honcho) on `main
 
 ---
 
----
-
 ## Why vLLM failed: AWQ model too large for pre-allocated KV cache
 
 vLLM was attempted as the replacement for Ollama. It supports both
@@ -189,29 +187,39 @@ every container restart. Even with the cache, startup time is significant.
 
 ---
 
-## Why lms (LM Studio CLI) in Podman
+## Why lms (LM Studio CLI) was not used — and what we use instead
 
-After vLLM failed, the conclusion is to containerize LM Studio's own inference engine.
-LM Studio 0.4.x includes an `lms` CLI binary that starts a headless server — solving
-the original problems with LM Studio (GUI, no SSH):
+After vLLM failed, the plan was to containerize LM Studio's own inference engine via
+the `lms` CLI. Testing revealed a hard blocker:
 
 ```
-lms server start --port 11434 --bind 0.0.0.0  # headless, no display needed
-lms load <model>                                # hot-swap model without restart
-lms unload                                      # unload current model
+$ lms server start --port 11434 --bind 0.0.0.0
+Error: LM Studio daemon is not running and no valid installation could be found or installed.
 ```
 
-**Why this is better than building a new solution:**
-- The inference engine (llama.cpp v2.13.0 with CUDA 12) is already proven to work
-  on this exact hardware with this exact model
-- LM Studio bundles its own CUDA libraries (`libcublas.so.12`, `libcublasLt.so.12`,
-  ~870 MB) — the container only needs NVIDIA driver access, not the host CUDA Toolkit
-- No new software to install, no compilation, no unknown variables
-- Hot-swap model switching via `lms load/unload` — works without container restart
+`lms server start` is **not a standalone server**. It's a control-plane CLI that
+requires the LM Studio desktop app daemon to be running. Without the GUI app, `lms`
+has nothing to connect to. The bundled backends in
+`~/.lmstudio/extensions/backends/llama.cpp-linux-x86_64-nvidia-cuda12-avx2-2.13.0/`
+are `.so` shared libraries — no standalone executable.
 
-The `lms` binary is a self-contained native ELF with only standard glibc dependencies.
-Containerization: mount the LM Studio installation at the same path, use a named
-volume for runtime state (`~/.lmstudio/.internal`).
+### What we use: `ghcr.io/ggml-org/llama.cpp:server-cuda`
+
+The official llama.cpp server image directly serves the OpenAI-compatible API.
+Key flags:
+
+```
+--split-mode=layer   # pipeline parallelism: GPU0 handles layers 0..N/2, GPU1 N/2..end
+--n-gpu-layers=99    # offload all layers to VRAM
+--alias=current      # API clients always send model="current" regardless of GGUF file
+```
+
+`--split-mode=layer` is the pipeline-parallelism mode that LM Studio used internally,
+which is why LM Studio performed well on this hardware (see "Why not Ollama?" above).
+
+**Hot-swap:** Without `lms load/unload`, model switching requires a container restart
+(`scripts/switch-model.sh`). For single-user use this is acceptable — restart takes
+~30 seconds, not 20 minutes like vLLM's Torch compilation.
 
 ---
 
@@ -234,3 +242,23 @@ speaches doesn't compete with the LLM for GPU memory on a fixed GPU, but
 adapts to whatever is available when the stack starts.
 
 speaches uses ~200 MB VRAM — negligible compared to the LLM.
+
+---
+
+## speaches: Blackwell PTX JIT and CUDA cache
+
+The speaches image (`latest-cuda`) was built with CUDA 12.6 and does not include
+compiled kernels for sm_120 (Blackwell). On first use of faster-whisper, CUDA
+JIT-compiles the kernels at runtime, which takes ~50 seconds.
+
+**Fix:** `CUDA_CACHE_PATH` is set to a named Podman volume (`speaches-cuda-cache`).
+CUDA stores compiled PTX kernels there, so subsequent container restarts skip
+recompilation. First-ever start is slow; all subsequent starts are fast (<0.5s).
+
+**STT model loading** is handled by the `speaches-warmup` sidecar container, which
+POSTs to `/v1/models/{model_id}` after speaches is healthy. This triggers model
+download (first run) or cache load (subsequent runs), ensuring OpenClaw finds the
+models in `/v1/models` immediately without falling back.
+
+The model list (`STT_MODEL`, `TTS_MODEL`) lives in `compose.yml` under
+`speaches-warmup.environment` — change it there to use different models.
