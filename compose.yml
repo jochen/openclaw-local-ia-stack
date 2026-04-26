@@ -2,35 +2,27 @@ name: ai-stack
 
 services:
 
-  # ── LLM Server (vLLM) ────────────────────────────────────────────────────────
+  # ── LLM Server (llama-server) ────────────────────────────────────────────────
   llm:
-    image: docker.io/vllm/vllm-openai:cu129-nightly
+    image: ghcr.io/ggerganov/llama.cpp:server-cuda
     container_name: llm
     devices:
       - nvidia.com/gpu=all
     security_opt:
       - label=disable
     ports:
-      - "11434:8000"
+      - "11434:8080"
     volumes:
-      - ${HF_CACHE}:/root/.cache/huggingface
-      - vllm-cache:/root/.cache/vllm
-    environment:
-      - NCCL_P2P_DISABLE=0
-      - NCCL_IB_DISABLE=1
-      - OMP_NUM_THREADS=4
-      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - ${LMSTUDIO_MODELS}:/models:ro
     command:
-      - --model=${VLLM_MODEL}
-      - --served-model-name
-      - current
-      - vision
-      - --tensor-parallel-size=2
-      # quantization is auto-detected from model config
-      - --max-model-len=${VLLM_MAX_CTX}
-      - --port=8000
-      - --trust-remote-code
-    shm_size: '2gb'
+      - --model=${LLAMA_MODEL}
+      - --alias=current
+      - --n-gpu-layers=99
+      - --split-mode=layer
+      - --ctx-size=${LLAMA_CTX}
+      - --host=0.0.0.0
+      - --port=8080
+      - --parallel=2
     restart: unless-stopped
 
   # ── Embeddings (infinity-emb) ─────────────────────────────────────────────────
@@ -146,7 +138,6 @@ services:
       retries: 5
 
 volumes:
-  vllm-cache:
   pgdata:
     external: true
     name: honcho_pgdata

@@ -129,16 +129,100 @@ These patches live in [jochen/honcho](https://github.com/jochen/honcho) on `main
 
 ---
 
-## Context window: 65536 not 150000
+---
 
-OpenClaw uses up to 150k token context. The original Ollama setup defaulted to
-150k (`context_length: 150000`) which pre-allocated ~11 GB of KV cache on top of
-the ~18 GB model weights — exceeding available VRAM on a single GPU and forcing
-everything onto both GPUs with heavy PCIe communication.
+## Why vLLM failed: AWQ model too large for pre-allocated KV cache
 
-`VLLM_MAX_CTX=65536` provides ample context for real conversations (LM Studio
-sessions showed ~29k-61k actual usage) while keeping KV cache memory reasonable.
-Adjust in `.env` if longer context is needed.
+vLLM was attempted as the replacement for Ollama. It supports both
+`--pipeline-parallel-size 2` and `--tensor-parallel-size 2` with NCCL communication.
+Both modes failed with CUDA out of memory errors, for the same root cause.
+
+### The fundamental mismatch
+
+The AWQ compressed-tensors version of `Qwen3.5-35B-A3B` (`cyankiwi/Qwen3.5-35B-A3B-AWQ-4bit`)
+is **22.78 GiB** on disk (vs 18 GB for the GGUF Q4_K_M). Loaded into VRAM with TP=2,
+each GPU ends up with ~14.4 GiB of model weights — leaving only ~1 GiB free per GPU.
+
+vLLM uses **eager KV cache pre-allocation**: it reserves a pool of KV cache blocks
+upfront based on `gpu-memory-utilization` × available_memory. With only 1 GiB free,
+this pool is far too small for any meaningful context window.
+
+Attempted configurations and their failures:
+
+**Pipeline parallel (`--pipeline-parallel-size 2`):**
+```
+PP stage 0 (GPU 0): 14.8 GiB allocated → only 88 MiB free
+Tried to allocate 1.03 GiB for KV cache → OOM
+```
+PP stage 0 received the Vision Encoder + its layer range, which is disproportionately
+large for a multimodal MoE model.
+
+**Tensor parallel (`--tensor-parallel-size 2`):**
+```
+Each GPU: ~14.4 GiB model weights → only ~1 GiB free
+Tried to allocate 528 MiB for KV cache profiling → OOM
+```
+Even with equal weight distribution, the Vision Encoder still loaded predominantly
+on GPU 0.
+
+### Why GGUF + llama.cpp (LM Studio) worked
+
+LM Studio ran the GGUF version (18 GB on disk, ~26 GB in VRAM) with 150K context
+because llama.cpp uses **lazy KV cache allocation**: it allocates KV cache blocks
+on demand per active sequence rather than pre-reserving a large pool.
+
+Observed VRAM in LM Studio:
+- GPU 0: 14.6 GiB
+- GPU 1: 11.7 GiB
+- KV cache: allocated dynamically on top, fits because it grows gradually
+
+This is a fundamental architectural difference between llama.cpp (single-user,
+lazy allocation) and vLLM (throughput-optimized, eager pool allocation). For a
+single-user setup like OpenClaw + honcho, llama.cpp's model is strictly superior.
+
+### vLLM compilation overhead (bonus learning)
+
+vLLM with CUDA graph compilation (`CompilationMode.VLLM_COMPILE`) takes 20-40 minutes
+on first startup to compile Torch Inductor kernels for 51 batch sizes. The cache
+must be persisted in a named volume (`vllm-cache`) or recompilation happens on
+every container restart. Even with the cache, startup time is significant.
+
+---
+
+## Why lms (LM Studio CLI) in Podman
+
+After vLLM failed, the conclusion is to containerize LM Studio's own inference engine.
+LM Studio 0.4.x includes an `lms` CLI binary that starts a headless server — solving
+the original problems with LM Studio (GUI, no SSH):
+
+```
+lms server start --port 11434 --bind 0.0.0.0  # headless, no display needed
+lms load <model>                                # hot-swap model without restart
+lms unload                                      # unload current model
+```
+
+**Why this is better than building a new solution:**
+- The inference engine (llama.cpp v2.13.0 with CUDA 12) is already proven to work
+  on this exact hardware with this exact model
+- LM Studio bundles its own CUDA libraries (`libcublas.so.12`, `libcublasLt.so.12`,
+  ~870 MB) — the container only needs NVIDIA driver access, not the host CUDA Toolkit
+- No new software to install, no compilation, no unknown variables
+- Hot-swap model switching via `lms load/unload` — works without container restart
+
+The `lms` binary is a self-contained native ELF with only standard glibc dependencies.
+Containerization: mount the LM Studio installation at the same path, use a named
+volume for runtime state (`~/.lmstudio/.internal`).
+
+---
+
+## Context window and KV cache
+
+LM Studio sessions showed actual usage of 29k–61k tokens. The model supports
+up to 128K context via YaRN. The llama-server flag `--ctx-size` sets the maximum
+context window; actual KV cache only grows to the active context length.
+
+`LLAMA_CTX=131072` in `.env` allows up to 131K context (matching LM Studio's
+observed 150K configuration) without pre-allocating all of it.
 
 ---
 
