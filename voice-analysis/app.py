@@ -69,7 +69,7 @@ def compute_wer_cer(intended: str, observed: str) -> dict:
 def compute_timing(words: list, segments: list) -> dict:
     """
     Bevorzugt Top-Level word-Timestamps (wenn via timestamp_granularities=word
-    angefordert). Fällt auf Segment-Timestamps zurück, wenn keine Wörter da.
+    angefordert). Faellt auf Segment-Timestamps zurueck, wenn keine Woerter da.
     """
     if words:
         source = "word"
@@ -177,7 +177,7 @@ def compute_mood_proxy(timing: dict, prosody: dict) -> dict:
     elif pitch_low and tempo_low and energy_low:
         label = "mude/traurig"
         hint  = ("Tiefer Pitch, langsames Tempo und niedrige Energie koennen "
-                 "auf Erschoepfung oder gedruckte Stimmung hinweisen.")
+                 "auf Erschoepfung oder gedrueckte Stimmung hinweisen.")
     elif pitch_high and energy_high:
         label = "aufgeregt/genervt"
         hint  = ("Erhoehter Pitch und Energie — leicht erhoehte emotionale "
@@ -197,6 +197,31 @@ def compute_mood_proxy(timing: dict, prosody: dict) -> dict:
     }
 
 
+# ── SER-Aufruf (gemeinsamer Helfer) ──────────────────────────────────────────
+
+async def call_ser(audio_bytes: bytes, filename: str) -> Optional[dict]:
+    """Schickt WAV an ser-Dienst. Gibt dict oder None zurueck."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                SER_URL,
+                files={"file": (filename, audio_bytes, "audio/wav")},
+            )
+        resp.raise_for_status()
+        ser_data = resp.json()
+        logger.info(
+            f"SER ok: arousal={ser_data.get('arousal')}, "
+            f"valence={ser_data.get('valence')}, "
+            f"dominance={ser_data.get('dominance')}, "
+            f"label={ser_data.get('label')}, "
+            f"infer_ms={ser_data.get('infer_ms')}"
+        )
+        return ser_data
+    except Exception as e:
+        logger.warning(f"SER nicht erreichbar, falle auf Heuristik zurueck: {e}")
+        return None
+
+
 # ── /analyze ────────────────────────────────────────────────────────────────
 
 @app.post("/analyze")
@@ -206,45 +231,80 @@ async def analyze(
     language: str = Form("de"),
 ):
     audio_bytes = await file.read()
+    filename = file.filename or "audio.wav"
 
-    # 1. Re-STT via Speaches (mit Wort-Timestamps)
+    # 1. Re-STT via Speaches — zweistufig
+    #    Stufe A: mit timestamp_granularities[]=word (Wort-Timing)
+    #    Stufe B: Fallback ohne timestamp_granularities (zuverlaessiger bei langen WAVs)
     observed = None
     timing   = None
+
+    # Stufe A: Wort-Timestamps
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 f"{SPEACHES_URL}/v1/audio/transcriptions",
-                files={"file": (file.filename or "audio.wav", audio_bytes, "audio/wav")},
+                files={"file": (filename, audio_bytes, "audio/wav")},
                 data={
-                    "model":           STT_MODEL,
-                    "language":        language,
-                    "response_format": "verbose_json",
-                    # Wort- und Segment-Granularitaet anfordern
-                    "timestamp_granularities[]": ["word", "segment"],
+                    "model":                     STT_MODEL,
+                    "language":                  language,
+                    "response_format":           "verbose_json",
+                    "timestamp_granularities[]": "word",
                 },
             )
-        resp.raise_for_status()
+        if resp.status_code >= 300:
+            raise ValueError(f"HTTP {resp.status_code}: {resp.text[:200]}")
         stt_data = resp.json()
-        observed = stt_data.get("text", "").strip()
+        text_a = stt_data.get("text", "").strip()
+        if not text_a:
+            raise ValueError("Leere Transkription in Stufe A")
+        observed = text_a
         words    = stt_data.get("words") or []
         segments = stt_data.get("segments") or []
         timing   = compute_timing(words, segments)
-        logger.info(f"STT ok: '{observed}' (words={len(words)}, segs={len(segments)})")
-    except Exception as e:
-        logger.error(f"STT fehlgeschlagen: {e}")
+        logger.info(
+            f"STT Stufe A (Wort-Timestamps) ok: '{observed[:60]}' "
+            f"(words={len(words)}, segs={len(segments)})"
+        )
+    except Exception as e_a:
+        logger.warning(f"STT Stufe A fehlgeschlagen ({e_a}), versuche Stufe B")
+        # Stufe B: einfaches verbose_json ohne Wort-Granularitaet
         try:
-            y, sr = librosa.load(io.BytesIO(audio_bytes), sr=None, mono=True)
-            dur = round(len(y) / sr, 3)
-        except Exception:
-            dur = 0.0
-        timing = {
-            "duration_s": dur,
-            "word_count": 0,
-            "words_per_sec": 0.0,
-            "pauses": [],
-            "pause_total_s": 0.0,
-            "timestamp_source": "none",
-        }
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{SPEACHES_URL}/v1/audio/transcriptions",
+                    files={"file": (filename, audio_bytes, "audio/wav")},
+                    data={
+                        "model":           STT_MODEL,
+                        "language":        language,
+                        "response_format": "verbose_json",
+                    },
+                )
+            resp.raise_for_status()
+            stt_data = resp.json()
+            text_b = stt_data.get("text", "").strip()
+            observed = text_b if text_b else None
+            segments = stt_data.get("segments") or []
+            timing   = compute_timing([], segments)
+            logger.info(
+                f"STT Stufe B (Segment-Timestamps) ok: '{str(observed)[:60]}' "
+                f"(segs={len(segments)})"
+            )
+        except Exception as e_b:
+            logger.error(f"STT Stufe B ebenfalls fehlgeschlagen: {e_b}")
+            try:
+                y, sr = librosa.load(io.BytesIO(audio_bytes), sr=None, mono=True)
+                dur = round(len(y) / sr, 3)
+            except Exception:
+                dur = 0.0
+            timing = {
+                "duration_s": dur,
+                "word_count": 0,
+                "words_per_sec": 0.0,
+                "pauses": [],
+                "pause_total_s": 0.0,
+                "timestamp_source": "none",
+            }
 
     # 2. Texttreue
     if observed is not None:
@@ -255,8 +315,33 @@ async def analyze(
     # 3. Prosodie
     prosody = compute_prosody(audio_bytes)
 
-    # 4. Mood-Proxy (Heuristik, /analyze nutzt noch kein SER)
-    mood = compute_mood_proxy(timing, prosody)
+    # 4. SER
+    ser_data = await call_ser(audio_bytes, filename)
+
+    # 5. Mood-Proxy: SER-backed oder Heuristik-Fallback
+    if ser_data is not None:
+        arousal   = ser_data.get("arousal", 0.5)
+        valence   = ser_data.get("valence", 0.5)
+        dominance = ser_data.get("dominance", 0.5)
+        ser_label = ser_data.get("label", "neutral")
+        mood_proxy = {
+            "label": ser_label,
+            "hint":  (
+                f"[SER: wav2vec2-large] "
+                f"arousal={arousal:.3f}, valence={valence:.3f}, dominance={dominance:.3f}"
+            ),
+        }
+        ser_field = {
+            "arousal":   arousal,
+            "valence":   valence,
+            "dominance": dominance,
+            "label":     ser_label,
+            "infer_ms":  ser_data.get("infer_ms"),
+            "device":    ser_data.get("device"),
+        }
+    else:
+        mood_proxy = compute_mood_proxy(timing, prosody)
+        ser_field  = None
 
     return JSONResponse({
         "intended":      intended,
@@ -264,7 +349,8 @@ async def analyze(
         "text_fidelity": fidelity,
         "timing":        timing,
         "prosody":       prosody,
-        "mood_proxy":    mood,
+        "mood_proxy":    mood_proxy,
+        "ser":           ser_field,
     })
 
 
@@ -284,25 +370,8 @@ async def mood_endpoint(file: UploadFile = File(...)):
         logger.error(f"/mood Prosodie-Fehler: {e}")
         return JSONResponse(status_code=422, content={"error": f"WAV konnte nicht verarbeitet werden: {e}"})
 
-    # SER-Anfrage an ser-Dienst
-    ser_data = None
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                SER_URL,
-                files={"file": (file.filename or "audio.wav", audio_bytes, "audio/wav")},
-            )
-        resp.raise_for_status()
-        ser_data = resp.json()
-        logger.info(
-            f"SER ok: arousal={ser_data.get('arousal')}, "
-            f"valence={ser_data.get('valence')}, "
-            f"dominance={ser_data.get('dominance')}, "
-            f"label={ser_data.get('label')}, "
-            f"infer_ms={ser_data.get('infer_ms')}"
-        )
-    except Exception as e:
-        logger.warning(f"SER nicht erreichbar, falle auf Heuristik zurück: {e}")
+    # SER
+    ser_data = await call_ser(audio_bytes, file.filename or "audio.wav")
 
     if ser_data is not None:
         # SER-Ergebnis verwenden
