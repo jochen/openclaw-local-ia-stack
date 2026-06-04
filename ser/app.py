@@ -20,10 +20,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ser")
 
 # ── Label-Schwellen (leicht justierbar) ─────────────────────────────────────
-AROUSAL_HIGH = 0.60
+AROUSAL_HIGH = 0.52
 AROUSAL_LOW  = 0.40
 VALENCE_HIGH = 0.55
-VALENCE_LOW  = 0.45
+VALENCE_LOW  = 0.50
 
 MODEL_NAME = "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
