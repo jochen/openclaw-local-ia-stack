@@ -1,219 +1,205 @@
 # openclaw-local-ai-stack
 
-Local AI stack for [OpenClaw](https://openclaw.ai) with persistent memory via [Honcho](https://github.com/plastic-labs/honcho). Runs entirely on-premise using Podman Compose.
+Lokaler AI-Stack für [OpenClaw](https://openclaw.ai) — läuft vollständig on-premise
+über Podman Compose auf einem einzelnen Dual-GPU-Host.
+
+Drei Dienste laufen dauerhaft: **LLM** (llama.cpp), **Embeddings** (infinity-emb)
+und **Speech** (speaches: STT/TTS/Diarization). Alle sprechen OpenAI-kompatible APIs.
+
+> **Historie:** Frühere Iterationen nutzten Honcho (Memory-Layer) mit PostgreSQL +
+> Redis sowie vLLM/lms statt llama.cpp. Beides ist nicht mehr aktiv — die Honcho-
+> Blöcke stehen noch auskommentiert in `compose.yml`, falls sie reaktiviert werden.
+> Begründungen zur Modell-/Server-Wahl: `DECISIONS.md`.
 
 ## Hardware
 
-| Component | Spec |
+| Komponente | Spec |
 |-----------|------|
-| GPU | 2× NVIDIA RTX 5060 Ti (Blackwell GB206) |
-| VRAM | 16 GB each = **32 GB total** |
-| GPU Interconnect | PCIe 4.0 (no NVLink) |
-| Host IP | 192.168.111.126 |
+| GPU | 2× NVIDIA RTX 5060 Ti (Blackwell GB206, sm120) |
+| VRAM | je 16 GB = **32 GB gesamt** |
+| GPU-Interconnect | PCIe 4.0 (kein NVLink) |
+| Host-IP | 192.168.111.126 |
+| SSH | `user@192.168.111.126` |
 
-> **Note on GPU architecture:** The RTX 5060 Ti is Blackwell (sm120, Compute Capability 12.0). Use images built with CUDA 12.9+ or that include PTX for JIT compilation. See `DECISIONS.md` for full evaluation history.
+> **GPU-Architektur:** Die RTX 5060 Ti ist Blackwell (sm120, CC 12.0). Nur Images
+> mit CUDA 12.9+ oder enthaltenem PTX (JIT) funktionieren. Treiber 580+ nötig.
 
-## Architecture
+## Architektur
 
 ```
-Clients (OpenClaw, coding tools, etc.)
+Clients (OpenClaw, Voice-Assistant, Coding-Tools, …)
          │
-         ├─ :11434  llama-server  — LLM inference, pipeline-parallel across both GPUs
-         ├─ :11435  infinity-emb  — Embedding model (nomic-embed-text-v1.5, 768 dims)
-         ├─ :8000   speaches      — Speech AI (STT/TTS), GPU with most free VRAM
-         └─ :9000   honcho-api    — Memory & social cognition layer
-                        ├── honcho-deriver  (background memory worker)
-                        ├── PostgreSQL + pgvector
-                        └── Redis
+         ├─ :11434  llm          — LLM-Inferenz (llama-server), layer-split über beide GPUs
+         ├─ :11435  embeddings   — nomic-embed-text-v1.5 (768 dims), CPU
+         └─ :8000   speaches     — Speech: STT / TTS / Diarization, auf der GPU mit meiste freier VRAM
 ```
 
-**One model at a time:** With 32 GB VRAM and a ~24 GB loaded LLM, only one large model fits. The `current` API alias always points to the loaded model. Switch models with `scripts/switch-model.sh` (restarts the container, ~30 seconds).
+**Ein großes Modell zur Zeit:** Bei 32 GB VRAM und einem ~24 GB-LLM passt nur ein
+großes Modell gleichzeitig. Der API-Alias `current` zeigt immer auf das geladene
+Modell. Wechsel via `scripts/switch-model.sh` (recreate des llm-Containers, ~30 s).
 
-## Services
+## Dienste
 
-| Service | Image | Port | Notes |
+| Dienst | Image | Port | Notes |
 |---------|-------|------|-------|
-| `llm` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | 11434 | OpenAI-compatible, pipeline-parallel (`--split-mode layer`) |
-| `embeddings` | `michaelf34/infinity:latest` | 11435 | nomic-embed-text-v1.5, 768 dims, CPU |
-| `speaches` | `speaches-ai/speaches:latest-cuda` | 8000 | Dynamic GPU selection at startup, CUDA int8 STT |
-| `speaches-warmup` | `alpine` | — | Lädt STT/TTS-Modelle beim Start, beendet sich danach |
-| `honcho-api` | local build (honcho-fork) | 9000 | Memory API |
-| `honcho-deriver` | local build (honcho-fork) | — | Background worker |
-| `database` | `pgvector/pgvector:pg15` | 5432 | localhost only |
-| `redis` | `redis:8.2` | 6379 | localhost only |
+| `llm` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | 11434 | OpenAI-kompatibel, layer-split (`--split-mode layer`), `--parallel 2`, Flash-Attention, multimodal via `--mmproj` |
+| `embeddings` | `michaelf34/infinity:latest` | 11435 | nomic-embed-text-v1.5, 768 dims, CPU-only, `--url-prefix=/v1` |
+| `speaches` | `ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda` | 8000 | STT (faster-whisper/ctranslate2, int8 CUDA), TTS (Piper/ONNX), Diarization; dynamische GPU-Wahl beim Start |
+| `speaches-warmup` | `alpine` | — | One-shot: lädt STT/TTS-Modelle wenn speaches healthy ist, beendet sich danach |
 
-## Prerequisites
+Honcho-, PostgreSQL- und Redis-Dienste sind in `compose.yml` auskommentiert (s. Historie oben).
+
+## VRAM-Budget
+
+```
+~29 GB  llm (Qwen3.5-35B-A3B-Q4_K_M, layer-split auf beide GPUs)
+          GPU0: ~15.2 GB   GPU1: ~13.6 GB
+          → dominiert vom KV-Cache des LLAMA_CTX (aktuell 262144!)
+~0.3 GB  speaches (Whisper int8 + Piper)
+~0.0 GB  embeddings (CPU-only)
+──────────────────────────────────────────────────────────────
+~29.5 GB / 32 GB belegt  →  nur ~2.5 GB frei
+```
+
+> **Wichtig — der KV-Cache ist die größte Stellschraube.** `LLAMA_CTX` bestimmt die
+> KV-Cache-Größe und damit den Löwenanteil der VRAM-Belegung. `262144` ist enorm;
+> ein Absenken auf z.B. `65536` gibt mehrere GB frei — Voraussetzung, wenn ein
+> weiteres GPU-Modell (z.B. ein Sprach-Analyse-/SER-Dienst) danebenpassen soll.
+
+## Voraussetzungen
 
 - Podman + podman-compose (`~/.local/bin/podman-compose`)
-- NVIDIA Container Toolkit with CDI configured (`nvidia.com/gpu=all`)
-- NVIDIA driver 580+ (CUDA 13.0, required for RTX 5060 Ti / Blackwell)
-- GGUF models already downloaded to `~/.lmstudio/models/`
-- `honcho-fork` repository cloned at `../honcho-fork` (sibling directory)
+- NVIDIA Container Toolkit mit CDI (`nvidia.com/gpu=all`)
+- NVIDIA-Treiber 580+ (CUDA 13, nötig für RTX 5060 Ti / Blackwell)
+- GGUF-Modelle lokal unter `~/.lmstudio/models/`
+
+> Host-`nvidia-smi` kann durch einen Treiber-/Library-Mismatch fehlschlagen
+> (NVML version mismatch) — die Container funktionieren trotzdem über CDI.
+> VRAM dann im Container abfragen: `podman exec speaches nvidia-smi`.
 
 ## Setup
 
-### 1. Configure environment
+### 1. Environment konfigurieren
 
 ```bash
 cp .env.example .env
-# Pfade prüfen: LMSTUDIO_MODELS und LLAMA_MODEL
+# Pfade prüfen: LMSTUDIO_MODELS, HF_CACHE, LLAMA_MODEL, LLAMA_CTX
 ```
 
-Create `../honcho-fork/.env` from the template in that repo.
-
-### 2. Start infrastructure first
+### 2. Stack starten
 
 ```bash
-podman compose up -d database redis embeddings
+podman compose up -d
+# llm lädt das GGUF (~24 GB VRAM, ~30 s) — Monitor: podman logs -f llm
+# speaches-warmup lädt danach automatisch STT/TTS und beendet sich
 ```
 
-### 3. Start the LLM
+Beim allerersten Start dauert der erste STT-Aufruf ~50 s (CUDA-JIT für Blackwell
+sm120). Ab dem zweiten Start greift `speaches-cuda-cache` → alle Aufrufe < 0.5 s.
+
+## Modell wechseln
 
 ```bash
-podman compose up -d llm
-# Lädt das GGUF-Modell (~24 GB VRAM) — dauert ~30 Sekunden
-# Monitor: podman logs -f llm
-```
-
-### 4. Start remaining services
-
-```bash
-podman compose up -d speaches honcho-api honcho-deriver
-```
-
-`speaches-warmup` startet automatisch wenn speaches healthy ist, lädt die konfigurierten STT/TTS-Modelle und beendet sich. Beim ersten Start dauert der erste STT-Aufruf ~50 Sekunden wegen CUDA-JIT-Kompilierung (Blackwell sm120). Ab dem zweiten Start greift der `speaches-cuda-cache` und alle Aufrufe sind unter 0.5s.
-
-## Switching models
-
-```bash
-# Auf ein anderes Modell wechseln (startet llm-Container neu, ~30 Sek.)
-scripts/switch-model.sh /models/lmstudio-community/Qwen3.5-27B-GGUF/Qwen3.5-27B-Q4_K_M.gguf
+# Auf ein anderes Modell wechseln (recreate des llm-Containers, ~30 s)
 scripts/switch-model.sh /models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf
 
-# Aktuelles Modell und verfügbare Modelle anzeigen
+# Aktuelles Modell + verfügbare Modelle anzeigen
 scripts/switch-model.sh
 ```
 
-Modelle liegen lokal als GGUF unter `~/.lmstudio/models/` und werden im Container unter `/models/` eingebunden.
+`switch-model.sh` schreibt `LLAMA_MODEL` in `.env` und recreate-t den llm-Container.
+Modelle liegen lokal als GGUF unter `~/.lmstudio/models/`, im Container unter `/models/`.
 
-## Downloading new LLM models
-
-LLM-Modelle (GGUF) werden von HuggingFace heruntergeladen. Einmalige Installation des CLI-Tools:
-
-```bash
-pip3 install --user huggingface_hub
-```
-
-Danach:
+## Neue LLM-Modelle herunterladen
 
 ```bash
-# Modelle suchen (z.B. GGUF-Modelle von lmstudio-community, sortiert nach Downloads)
+pip3 install --user huggingface_hub   # einmalig
+
+# Modelle suchen (vorquantisierte GGUF von lmstudio-community)
 hf models list --author lmstudio-community --filter gguf --sort downloads --limit 20 --format quiet
 
-# Infos zu einem bestimmten Modell-Repo
-hf models info lmstudio-community/Qwen3.5-27B-GGUF
-
-# Einzelne GGUF-Datei herunterladen
-hf download \
-  lmstudio-community/Qwen3.5-27B-GGUF \
-  Qwen3.5-27B-Q4_K_M.gguf \
+# Datei laden
+hf download lmstudio-community/Qwen3.5-27B-GGUF Qwen3.5-27B-Q4_K_M.gguf \
   --local-dir ~/.lmstudio/models/lmstudio-community/Qwen3.5-27B-GGUF
 
-# Anschließend direkt laden
+# Direkt aktivieren
 scripts/switch-model.sh /models/lmstudio-community/Qwen3.5-27B-GGUF/Qwen3.5-27B-Q4_K_M.gguf
 ```
 
 **Quantisierungs-Richtwert für 32 GB VRAM:**
 
-| Modellgröße | Empfohlene Quantisierung | VRAM ca. |
-|-------------|--------------------------|----------|
-| 7–8B        | Q8_0                     | ~9 GB    |
-| 14B         | Q6_K                     | ~13 GB   |
-| 27–35B      | Q4_K_M                   | ~20–24 GB|
-| 70B         | Q2_K                     | ~28 GB   |
+| Modellgröße | Quantisierung | VRAM ca. |
+|-------------|---------------|----------|
+| 7–8B        | Q8_0          | ~9 GB    |
+| 14B         | Q6_K          | ~13 GB   |
+| 27–35B      | Q4_K_M        | ~20–24 GB|
+| 70B         | Q2_K          | ~28 GB   |
 
-Modellnamen auf HuggingFace: am besten unter `lmstudio-community` suchen — dort gibt es vorquantisierte GGUF-Pakete für die gängigen Modelle.
+(VRAM zzgl. KV-Cache — bei großem `LLAMA_CTX` deutlich mehr.)
 
-## Speech models (speaches)
+## Speech-Modelle (speaches)
 
-STT- und TTS-Modelle sind in `compose.yml` unter `speaches-warmup` konfiguriert (`STT_MODEL`, `TTS_MODEL`). Beim Start lädt `speaches-warmup` die Modelle automatisch über die speaches-API — kein manueller Download nötig. Die Modelle werden im Podman-Volume `speaches-cache` gecacht.
+STT/TTS-Modelle stehen in `compose.yml` unter `speaches-warmup` (`STT_MODEL`,
+`TTS_MODEL`). `speaches-warmup` lädt sie beim Start automatisch über die API —
+kein manueller Download nötig.
+
+Aktuell: STT `guillaumekln/faster-whisper-medium`, TTS `speaches-ai/piper-de_DE-thorsten-medium`.
+
+Endpoints (OpenAI-kompatibel, Base `http://192.168.111.126:8000`):
+- `POST /v1/audio/transcriptions` — STT
+- `POST /v1/audio/speech` — TTS
+- `POST /v1/audio/diarization` — Sprecher-Diarization (mit `known_speaker_*[]`-Referenzen)
 
 Zwei persistente Volumes:
-- **`speaches-cache`** — HuggingFace Modell-Weights (bleibt über Neustarts erhalten)
-- **`speaches-cuda-cache`** — Kompilierte CUDA-Kernels für Blackwell (verhindert ~50s JIT-Delay)
+- **`speaches-cache`** — HuggingFace-Weights (überlebt Neustarts)
+- **`speaches-cuda-cache`** — kompilierte Blackwell-Kernels (verhindert ~50 s JIT-Delay)
+
+GPU-Wahl: `scripts/speaches-entrypoint.sh` setzt vor dem Start `CUDA_VISIBLE_DEVICES`
+auf die GPU mit der meisten freien VRAM (per `nvidia-smi`).
 
 ```bash
-# Welche Modelle sind bereits gecacht?
+# Welche Modelle sind gecacht?
 podman run --rm -v speaches-cache:/cache alpine ls /cache
-
-# STT/TTS-Modelle manuell ändern: STT_MODEL / TTS_MODEL in compose.yml anpassen
 ```
 
-## Client configuration (OpenClaw, coding tools)
+## Client-Konfiguration (OpenClaw, Voice-Assistant, Coding-Tools)
 
-| Setting | Value |
-|---------|-------|
+| Setting | Wert |
+|---------|------|
 | Provider | `openai` (OpenAI-kompatibel, **nicht** `ollama`) |
 | Base URL | `http://192.168.111.126:11434/v1` |
 | API Key | `llamacpp` (beliebiger nicht-leerer String) |
-| Chat model | `current` |
-| Vision model | `vision` *(aktuell nicht konfiguriert)* |
-| Speech (speaches) | `http://192.168.111.126:8000` |
-| Honcho API | `http://192.168.111.126:9000` |
+| Chat-Modell | `current` |
+| Vision | über `--mmproj` am geladenen Modell (Qwen3.5-35B-A3B ist multimodal) → gleicher `current`-Endpoint |
+| Embeddings | `http://192.168.111.126:11435/v1` (`nomic-embed-text-v1.5`) |
+| Speech | `http://192.168.111.126:8000` |
 
-`current` löst auf das aktuell geladene Modell auf (Alias via `--alias current`).
+`current` löst auf das aktuell geladene Modell auf (`--alias current`).
 
-## Stack management
+## Stack-Verwaltung
 
 ```bash
-# Alle Services starten
-podman compose up -d
-
-# Alle Services stoppen
-podman compose down
-
-# Logs
-podman logs -f llm
-podman logs -f honcho-api
-
-# Honcho nach Code-Änderungen neu bauen
-podman compose build --no-cache honcho-api honcho-deriver
-podman stop honcho-api honcho-deriver && podman rm honcho-api honcho-deriver
-podman compose up -d honcho-api honcho-deriver
+podman compose up -d            # alle Dienste starten
+podman compose down             # alle Dienste stoppen
+podman ps                       # laufende Container
+podman logs -f llm              # Logs
+podman exec speaches nvidia-smi # VRAM (Host-nvidia-smi ggf. kaputt)
 ```
 
-## VRAM budget
+## Hinweise
 
-```
-~24.4 GB  llama-server (Qwen3.5-35B-A3B-Q4_K_M.gguf, aufgeteilt auf 2 GPUs)
-           GPU0: ~12.4 GB  GPU1: ~12.0 GB
- ~0.3 GB  speaches
- ~0.0 GB  infinity-emb (CPU-only)
-──────────────────────────────────────────────────────
-~24.7 GB / 32 GB VRAM genutzt wenn Modell geladen
-```
+**Qwen3 Thinking-Tokens:** Qwen3-Reasoning-Modelle erzeugen vor jeder Antwort
+interne `<think>…</think>`-Tokens. Für Clients, die das nicht wollen (kostet
+`max_tokens`-Budget), lässt es sich pro Request über
+`chat_template_kwargs: {"enable_thinking": false}` (via `extra_body`) abschalten —
+das setzt den Qwen3-`<|nothink|>`-Token. Der OpenAI-Parameter `reasoning_effort:
+"none"` wird von llama.cpp für Qwen3 **nicht** beachtet (Details: `DECISIONS.md`).
 
-## Honcho + thinking models (Qwen3)
-
-Qwen3 reasoning models generate internal `<think>…</think>` tokens before every response. Without suppression, these consume honcho's entire `max_tokens` budget, leaving empty content — the deriver produces no observations and the summarizer falls back to stub text.
-
-`honcho-fork/.env` disables thinking for deriver and summarizer calls:
-
-```
-DERIVER_MODEL_CONFIG__THINKING_EFFORT=none
-SUMMARY_MODEL_CONFIG__THINKING_EFFORT=none
-```
-
-This translates to `chat_template_kwargs: {"enable_thinking": false}` in the llama.cpp request (via `extra_body`), which inserts the Qwen3 `<|nothink|>` token. The standard `reasoning_effort: "none"` OpenAI parameter is **not** honored by llama.cpp for Qwen3 — see `DECISIONS.md` for the full diagnosis.
-
-**Switching models:**
-- **Non-thinking model** (Qwen2.5, Llama 3, Mistral, …): setting is silently ignored by llama.cpp, leave it as-is
-- **Another thinking model** (DeepSeek-R1, future Qwen releases): same mechanism works
-- **Real OpenAI API** (o1/o3): would require a different approach — not relevant for this local stack
+**`modelfiles/`** (gitignored) stammt aus der ollama-Ära und wird von llama.cpp
+nicht verwendet — toter Ballast, kann ignoriert werden.
 
 ---
 
-## Related repositories
+## Verwandte Repositories
 
-- [honcho-fork](https://github.com/jochen/honcho) — Local fork of plastic-labs/honcho with dimension patches
-- [plastic-labs/honcho](https://github.com/plastic-labs/honcho) — Upstream honcho
+- [openclaw-voice-assist](https://github.com/jochen/openclaw_voice_assist) — Voice-Pipeline auf dem Pi, nutzt diesen Stack (speaches + llm)
