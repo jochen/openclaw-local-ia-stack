@@ -52,19 +52,24 @@ Honcho-, PostgreSQL- und Redis-Dienste sind in `compose.yml` auskommentiert (s. 
 ## VRAM-Budget
 
 ```
-~29 GB  llm (Qwen3.5-35B-A3B-Q4_K_M, layer-split auf beide GPUs)
-          GPU0: ~15.2 GB   GPU1: ~13.6 GB
-          → dominiert vom KV-Cache des LLAMA_CTX (aktuell 262144!)
-~0.3 GB  speaches (Whisper int8 + Piper)
+~22 GB  llm (Qwen3.5-35B-A3B-Q4_K_M, layer-split auf beide GPUs, LLAMA_CTX=65536)
+          GPU0: ~12.3 GB   GPU1: ~10.5 GB
+~0.3 GB  speaches (Whisper int8 + Piper) — auf der GPU mit meiste freier VRAM
 ~0.0 GB  embeddings (CPU-only)
 ──────────────────────────────────────────────────────────────
-~29.5 GB / 32 GB belegt  →  nur ~2.5 GB frei
+~22.8 GB / 32 GB belegt  →  ~8.4 GB frei (GPU0 ~3.3 GB, GPU1 ~5.1 GB)
 ```
 
-> **Wichtig — der KV-Cache ist die größte Stellschraube.** `LLAMA_CTX` bestimmt die
-> KV-Cache-Größe und damit den Löwenanteil der VRAM-Belegung. `262144` ist enorm;
-> ein Absenken auf z.B. `65536` gibt mehrere GB frei — Voraussetzung, wenn ein
-> weiteres GPU-Modell (z.B. ein Sprach-Analyse-/SER-Dienst) danebenpassen soll.
+> **Der KV-Cache ist die größte Stellschraube.** `LLAMA_CTX` bestimmt die
+> KV-Cache-Größe und damit den Löwenanteil der VRAM-Belegung. Das Absenken von
+> `262144` auf `65536` hat ~6 GB freigemacht — genug, um auf GPU1 (~5 GB frei)
+> einen zusätzlichen Sprach-Analyse-/SER-Dienst zu betreiben. Bei Bedarf weiter
+> senken.
+>
+> **GPU-Wechsel beim Recreate:** Ein `--force-recreate` des llm-Containers kann an
+> einem inaktiven `nvidia-persistenced` scheitern (CDI verlangt
+> `/run/nvidia-persistenced/socket`). Dann `sudo systemctl start
+> nvidia-persistenced` oder im Zweifel den Host neu starten.
 
 ## Voraussetzungen
 
