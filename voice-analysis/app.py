@@ -13,6 +13,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voice-analysis")
 
 SPEACHES_URL = "http://speaches:8000"
+SER_URL = "http://ser:8002/ser"
 STT_MODEL = "guillaumekln/faster-whisper-medium"
 
 app = FastAPI(title="voice-analysis")
@@ -150,7 +151,7 @@ def compute_prosody(audio_bytes: bytes) -> dict:
         }
 
 
-# ── Mood-Proxy-Heuristik ─────────────────────────────────────────────────────
+# ── Mood-Proxy-Heuristik (Fallback ohne SER) ─────────────────────────────────
 
 def compute_mood_proxy(timing: dict, prosody: dict) -> dict:
     """
@@ -192,7 +193,7 @@ def compute_mood_proxy(timing: dict, prosody: dict) -> dict:
 
     return {
         "label": label,
-        "hint":  f"[Heuristik, kein echtes SER] {hint}",
+        "hint":  f"[Heuristik-Fallback, kein echtes SER] {hint}",
     }
 
 
@@ -254,7 +255,7 @@ async def analyze(
     # 3. Prosodie
     prosody = compute_prosody(audio_bytes)
 
-    # 4. Mood-Proxy
+    # 4. Mood-Proxy (Heuristik, /analyze nutzt noch kein SER)
     mood = compute_mood_proxy(timing, prosody)
 
     return JSONResponse({
@@ -271,19 +272,71 @@ async def analyze(
 
 @app.post("/mood")
 async def mood_endpoint(file: UploadFile = File(...)):
-    """Stimmungsanalyse aus reinem WAV — kein STT, kein intended-Text."""
+    """Stimmungsanalyse aus reinem WAV — SER-backed, Prosodie-Fallback."""
     audio_bytes = await file.read()
     if not audio_bytes:
         return JSONResponse(status_code=400, content={"error": "Leere Datei."})
 
+    # Prosodie immer berechnen (bleibt im Response + dient als Fallback)
     try:
         prosody = compute_prosody(audio_bytes)
     except Exception as e:
         logger.error(f"/mood Prosodie-Fehler: {e}")
         return JSONResponse(status_code=422, content={"error": f"WAV konnte nicht verarbeitet werden: {e}"})
 
-    # Ohne STT kein Tempo — Dummy-Timing mit words_per_sec=0 (Tempo-Features neutral)
-    dummy_timing = {"words_per_sec": 0.0}
-    mood = compute_mood_proxy(dummy_timing, prosody)
+    # SER-Anfrage an ser-Dienst
+    ser_data = None
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                SER_URL,
+                files={"file": (file.filename or "audio.wav", audio_bytes, "audio/wav")},
+            )
+        resp.raise_for_status()
+        ser_data = resp.json()
+        logger.info(
+            f"SER ok: arousal={ser_data.get('arousal')}, "
+            f"valence={ser_data.get('valence')}, "
+            f"dominance={ser_data.get('dominance')}, "
+            f"label={ser_data.get('label')}, "
+            f"infer_ms={ser_data.get('infer_ms')}"
+        )
+    except Exception as e:
+        logger.warning(f"SER nicht erreichbar, falle auf Heuristik zurück: {e}")
 
-    return JSONResponse({"prosody": prosody, "mood_proxy": mood})
+    if ser_data is not None:
+        # SER-Ergebnis verwenden
+        arousal   = ser_data.get("arousal", 0.5)
+        valence   = ser_data.get("valence", 0.5)
+        dominance = ser_data.get("dominance", 0.5)
+        label     = ser_data.get("label", "neutral")
+        mood_proxy = {
+            "label": label,
+            "hint":  (
+                f"[SER: wav2vec2-large] "
+                f"arousal={arousal:.3f}, valence={valence:.3f}, dominance={dominance:.3f}"
+            ),
+        }
+        response = {
+            "prosody":    prosody,
+            "mood_proxy": mood_proxy,
+            "ser": {
+                "arousal":   arousal,
+                "valence":   valence,
+                "dominance": dominance,
+                "label":     label,
+                "infer_ms":  ser_data.get("infer_ms"),
+                "device":    ser_data.get("device"),
+            },
+        }
+    else:
+        # Fallback: Prosodie-Heuristik
+        dummy_timing = {"words_per_sec": 0.0}
+        mood_proxy = compute_mood_proxy(dummy_timing, prosody)
+        response = {
+            "prosody":    prosody,
+            "mood_proxy": mood_proxy,
+            "ser":        None,
+        }
+
+    return JSONResponse(response)

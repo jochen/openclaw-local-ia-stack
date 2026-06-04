@@ -193,7 +193,30 @@ services:
 #      timeout: 5s
 #      retries: 5
 
-  # ── Voice Analysis (CPU-only, Audio-Analyse + Stimmungs-Heuristik) ───────────
+  # ── SER – Speech Emotion Recognition (GPU1, wav2vec2-large) ─────────────────
+  ser:
+    build:
+      context: ./ser
+    container_name: ser
+    devices:
+      - nvidia.com/gpu=all
+    security_opt:
+      - label=disable
+    environment:
+      - CUDA_VISIBLE_DEVICES=1
+    ports:
+      - "0.0.0.0:8002:8002"
+    volumes:
+      - ${HF_CACHE}:/root/.cache/huggingface
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # ── Voice Analysis (CPU-only, Audio-Analyse + SER-backed Stimmung) ───────────
   voice-analysis:
     build:
       context: ./voice-analysis
@@ -203,6 +226,8 @@ services:
     depends_on:
       speaches:
         condition: service_healthy
+      ser:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]

@@ -3,8 +3,9 @@
 Lokaler AI-Stack für [OpenClaw](https://openclaw.ai) — läuft vollständig on-premise
 über Podman Compose auf einem einzelnen Dual-GPU-Host.
 
-Drei Dienste laufen dauerhaft: **LLM** (llama.cpp), **Embeddings** (infinity-emb)
-und **Speech** (speaches: STT/TTS/Diarization). Alle sprechen OpenAI-kompatible APIs.
+Vier Dienste laufen dauerhaft: **LLM** (llama.cpp), **Embeddings** (infinity-emb),
+**Speech** (speaches: STT/TTS/Diarization) und **SER** (Speech Emotion Recognition,
+wav2vec2-large auf GPU). Alle sprechen OpenAI-kompatible oder eigene REST-APIs.
 
 > **Historie:** Frühere Iterationen nutzten Honcho (Memory-Layer) mit PostgreSQL +
 > Redis sowie vLLM/lms statt llama.cpp. Beides ist nicht mehr aktiv — die Honcho-
@@ -32,7 +33,8 @@ Clients (OpenClaw, Voice-Assistant, Coding-Tools, …)
          ├─ :11434  llm          — LLM-Inferenz (llama-server), layer-split über beide GPUs
          ├─ :11435  embeddings   — nomic-embed-text-v1.5 (768 dims), CPU
          ├─ :8000   speaches     — Speech: STT / TTS / Diarization, auf der GPU mit meiste freier VRAM
-         └─ :8001   voice-analysis — TTS-/Sprach-Analyse (CPU-only, ruft speaches intern)
+         ├─ :8001   voice-analysis — Sprach-Analyse (CPU-only); /mood nutzt intern den ser-Dienst
+         └─ :8002   ser          — Speech Emotion Recognition (GPU1, wav2vec2-large, fp16)
 ```
 
 **Ein großes Modell zur Zeit:** Bei 32 GB VRAM und einem ~24 GB-LLM passt nur ein
@@ -47,7 +49,8 @@ Modell. Wechsel via `scripts/switch-model.sh` (recreate des llm-Containers, ~30 
 | `embeddings` | `michaelf34/infinity:latest` | 11435 | nomic-embed-text-v1.5, 768 dims, CPU-only, `--url-prefix=/v1` |
 | `speaches` | `ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda` | 8000 | STT (faster-whisper/ctranslate2, int8 CUDA), TTS (Piper/ONNX), Diarization; dynamische GPU-Wahl beim Start |
 | `speaches-warmup` | `alpine` | — | One-shot: lädt STT/TTS-Modelle wenn speaches healthy ist, beendet sich danach |
-| `voice-analysis` | `./voice-analysis` (Build) | 8001 | CPU-only; Re-STT + Texttreue (WER/CER) + Timing (Wort-Timestamps) + Prosodie (librosa pyin) + Stimmungs-Heuristik; ruft `speaches:8000` intern |
+| `ser` | `./ser` (Build) | 8002 | **GPU1** (CUDA_VISIBLE_DEVICES=1, fp16); `POST /ser` (WAV → arousal/valence/dominance + label); Modell: `audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim` (~600 MiB VRAM) |
+| `voice-analysis` | `./voice-analysis` (Build) | 8001 | CPU-only; Re-STT + Texttreue (WER/CER) + Timing + Prosodie (librosa pyin); `/mood` SER-backed (ruft `ser:8002` intern, Prosodie-Heuristik als Fallback) |
 
 Honcho-, PostgreSQL- und Redis-Dienste sind in `compose.yml` auskommentiert (s. Historie oben).
 
@@ -56,10 +59,11 @@ Honcho-, PostgreSQL- und Redis-Dienste sind in `compose.yml` auskommentiert (s. 
 ```
 ~22 GB  llm (Qwen3.5-35B-A3B-Q4_K_M, layer-split auf beide GPUs, LLAMA_CTX=65536)
           GPU0: ~12.3 GB   GPU1: ~10.5 GB
-~0.3 GB  speaches (Whisper int8 + Piper) — auf der GPU mit meiste freier VRAM
+~0.4 GB  speaches (Whisper int8 + Piper) — auf GPU1 (meiste freie VRAM beim Start)
+~0.6 GB  ser (wav2vec2-large, fp16) — GPU1 (gepinnt via CUDA_VISIBLE_DEVICES=1)
 ~0.0 GB  embeddings (CPU-only)
 ──────────────────────────────────────────────────────────────
-~22.8 GB / 32 GB belegt  →  ~8.4 GB frei (GPU0 ~3.3 GB, GPU1 ~5.1 GB)
+~23.7 GB / 32 GB belegt  →  ~8.3 GB frei (GPU0 ~3.3 GB, GPU1 ~4.6 GB)
 ```
 
 > **Der KV-Cache ist die größte Stellschraube.** `LLAMA_CTX` bestimmt die
@@ -237,6 +241,9 @@ Fehlerfall: wenn Re-STT fehlschlägt, `observed: null`, Prosodie wird trotzdem g
 
 Schnelle Stimmungsanalyse von **Nutzer-Audio** — kein STT, kein Textvergleich.
 Gedacht für den Voice-Assistant, der das `label` in den LLM-Prompt einspeist.
+Das Label kommt jetzt **vom SER-Dienst** (wav2vec2-large, dimensional), nicht mehr
+aus der Pitch/Energie-Heuristik. Bei Ausfall von `ser` greift Prosodie-Heuristik als
+Fallback (kein Crash, `ser`-Feld ist dann `null`).
 
 | Feld | Typ | Pflicht | Beschreibung |
 |------|-----|---------|--------------|
@@ -245,6 +252,16 @@ Gedacht für den Voice-Assistant, der das `label` in den LLM-Prompt einspeist.
 Antwort-Felder:
 
 - **`prosody`** — `f0_mean/std/min/max_hz` (stimmhafte Frames via librosa pyin), `rms_mean/std`
-- **`mood_proxy`** — `label` aus {neutral, aufgeregt/genervt, müde/traurig}, `hint` (Klartext); Heuristik auf Pitch + Energie (ohne Tempo, da kein STT)
+- **`mood_proxy`** — `label` aus {neutral, genervt/verärgert, aufgeregt/freudig, müde/traurig}, `hint` (Rohwerte arousal/valence/dominance oder Fallback-Hinweis)
+- **`ser`** — Rohwerte vom SER-Dienst: `arousal`, `valence`, `dominance` (je 0–1), `label`, `infer_ms`, `device`; `null` wenn Dienst nicht erreichbar
+
+Label-Mapping (Schwellen in `ser/app.py` justierbar):
+
+| Bedingung | Label |
+|-----------|-------|
+| arousal > 0.60 und valence < 0.45 | `genervt/verärgert` |
+| arousal > 0.60 und valence ≥ 0.55 | `aufgeregt/freudig` |
+| arousal < 0.40 und valence < 0.45 | `müde/traurig` |
+| sonst | `neutral` |
 
 Fehlerfall: `422` bei ungültigem/leerem WAV.
