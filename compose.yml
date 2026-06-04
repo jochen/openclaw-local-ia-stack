@@ -193,6 +193,25 @@ services:
 #      timeout: 5s
 #      retries: 5
 
+  # ── Voice Analysis (CPU-only, Audio-Analyse + Stimmungs-Heuristik) ───────────
+  voice-analysis:
+    build:
+      context: ./voice-analysis
+    container_name: voice-analysis
+    ports:
+      - "0.0.0.0:8001:8001"
+    depends_on:
+      speaches:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+
 volumes:
 #  pgdata:
 #    external: true

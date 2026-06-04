@@ -31,7 +31,8 @@ Clients (OpenClaw, Voice-Assistant, Coding-Tools, …)
          │
          ├─ :11434  llm          — LLM-Inferenz (llama-server), layer-split über beide GPUs
          ├─ :11435  embeddings   — nomic-embed-text-v1.5 (768 dims), CPU
-         └─ :8000   speaches     — Speech: STT / TTS / Diarization, auf der GPU mit meiste freier VRAM
+         ├─ :8000   speaches     — Speech: STT / TTS / Diarization, auf der GPU mit meiste freier VRAM
+         └─ :8001   voice-analysis — TTS-/Sprach-Analyse (CPU-only, ruft speaches intern)
 ```
 
 **Ein großes Modell zur Zeit:** Bei 32 GB VRAM und einem ~24 GB-LLM passt nur ein
@@ -46,6 +47,7 @@ Modell. Wechsel via `scripts/switch-model.sh` (recreate des llm-Containers, ~30 
 | `embeddings` | `michaelf34/infinity:latest` | 11435 | nomic-embed-text-v1.5, 768 dims, CPU-only, `--url-prefix=/v1` |
 | `speaches` | `ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda` | 8000 | STT (faster-whisper/ctranslate2, int8 CUDA), TTS (Piper/ONNX), Diarization; dynamische GPU-Wahl beim Start |
 | `speaches-warmup` | `alpine` | — | One-shot: lädt STT/TTS-Modelle wenn speaches healthy ist, beendet sich danach |
+| `voice-analysis` | `./voice-analysis` (Build) | 8001 | CPU-only; Re-STT + Texttreue (WER/CER) + Timing (Wort-Timestamps) + Prosodie (librosa pyin) + Stimmungs-Heuristik; ruft `speaches:8000` intern |
 
 Honcho-, PostgreSQL- und Redis-Dienste sind in `compose.yml` auskommentiert (s. Historie oben).
 
@@ -202,6 +204,26 @@ das setzt den Qwen3-`<|nothink|>`-Token. Der OpenAI-Parameter `reasoning_effort:
 
 **`modelfiles/`** (gitignored) stammt aus der ollama-Ära und wird von llama.cpp
 nicht verwendet — toter Ballast, kann ignoriert werden.
+
+## voice-analysis — `/analyze`-Contract
+
+`POST http://192.168.111.126:8001/analyze` (multipart/form-data)
+
+| Feld | Typ | Pflicht | Beschreibung |
+|------|-----|---------|--------------|
+| `file` | WAV | ja | PCM16 mono, 16 kHz oder 22 kHz |
+| `intended` | string | ja | Erwarteter Sprechtext |
+| `language` | string | nein | ISO-639-1, default `de` |
+
+Antwort-Felder:
+
+- **`text_fidelity`** — `wer`, `cer`, `match` (WER < 0.15 gilt als Treffer); normalisiert (lowercase, Satzzeichen weg)
+- **`timing`** — `duration_s`, `word_count`, `words_per_sec`, `pauses` (Lücken > 0.3 s), `pause_total_s`, `timestamp_source` (`word` | `segment`)
+- **`prosody`** — `f0_mean/std/min/max_hz` (stimmhafte Frames via librosa pyin), `rms_mean/std`
+- **`mood_proxy`** — `label` aus {neutral, aufgeregt/genervt, müde/traurig}, `hint` (Klartext für LLM); explizit als grobe Heuristik gekennzeichnet, kein echtes SER
+
+Fehlerfall: wenn Re-STT fehlschlägt, `observed: null`, Prosodie wird trotzdem geliefert.
+
 
 ---
 
