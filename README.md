@@ -230,3 +230,21 @@ Fehlerfall: wenn Re-STT fehlschlägt, `observed: null`, Prosodie wird trotzdem g
 ## Verwandte Repositories
 
 - [openclaw-voice-assist](https://github.com/jochen/openclaw_voice_assist) — Voice-Pipeline auf dem Pi, nutzt diesen Stack (speaches + llm)
+
+## voice-analysis — `/mood`-Contract
+
+`POST http://192.168.111.126:8001/mood` (multipart/form-data)
+
+Schnelle Stimmungsanalyse von **Nutzer-Audio** — kein STT, kein Textvergleich.
+Gedacht für den Voice-Assistant, der das `label` in den LLM-Prompt einspeist.
+
+| Feld | Typ | Pflicht | Beschreibung |
+|------|-----|---------|--------------|
+| `file` | WAV | ja | PCM16 mono, beliebige Sample-Rate |
+
+Antwort-Felder:
+
+- **`prosody`** — `f0_mean/std/min/max_hz` (stimmhafte Frames via librosa pyin), `rms_mean/std`
+- **`mood_proxy`** — `label` aus {neutral, aufgeregt/genervt, müde/traurig}, `hint` (Klartext); Heuristik auf Pitch + Energie (ohne Tempo, da kein STT)
+
+Fehlerfall: `422` bei ungültigem/leerem WAV.

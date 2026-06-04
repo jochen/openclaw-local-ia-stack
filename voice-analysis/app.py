@@ -265,3 +265,25 @@ async def analyze(
         "prosody":       prosody,
         "mood_proxy":    mood,
     })
+
+
+# ── /mood ────────────────────────────────────────────────────────────────────
+
+@app.post("/mood")
+async def mood_endpoint(file: UploadFile = File(...)):
+    """Stimmungsanalyse aus reinem WAV — kein STT, kein intended-Text."""
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        return JSONResponse(status_code=400, content={"error": "Leere Datei."})
+
+    try:
+        prosody = compute_prosody(audio_bytes)
+    except Exception as e:
+        logger.error(f"/mood Prosodie-Fehler: {e}")
+        return JSONResponse(status_code=422, content={"error": f"WAV konnte nicht verarbeitet werden: {e}"})
+
+    # Ohne STT kein Tempo — Dummy-Timing mit words_per_sec=0 (Tempo-Features neutral)
+    dummy_timing = {"words_per_sec": 0.0}
+    mood = compute_mood_proxy(dummy_timing, prosody)
+
+    return JSONResponse({"prosody": prosody, "mood_proxy": mood})
