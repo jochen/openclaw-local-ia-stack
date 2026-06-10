@@ -114,28 +114,56 @@ sm120). Ab dem zweiten Start greift `speaches-cuda-cache` → alle Aufrufe < 0.5
 # Auf ein anderes Modell wechseln (recreate des llm-Containers, ~30 s)
 scripts/switch-model.sh /models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf
 
-# Aktuelles Modell + verfügbare Modelle anzeigen
+# Lokal verfügbare Modelle durchsuchen (rein lesend, kein Switch/Restart)
+scripts/switch-model.sh search Q4_K_S
+
+# Aktuelles Modell + mmproj + MTP-Status + verfügbare Modelle anzeigen
 scripts/switch-model.sh
 ```
 
 `switch-model.sh` schreibt `LLAMA_MODEL` in `.env` und recreate-t den llm-Container.
 Modelle liegen lokal als GGUF unter `~/.lmstudio/models/`, im Container unter `/models/`.
 
-## Neue LLM-Modelle herunterladen
+Beim Wechsel passiert zusätzlich automatisch:
+- **mmproj-Erkennung:** das Verzeichnis des neuen Modells wird nach `*mmproj*.gguf`
+  durchsucht. Bei genau einem Treffer wird `LLAMA_MMPROJ` in `.env` entsprechend
+  gesetzt (multimodale/Vision-Unterstützung über `--mmproj`). Bei keinem Treffer
+  wird `LLAMA_MMPROJ` geleert (kein `--mmproj`-Flag). Bei mehreren Treffern wird
+  nichts geändert — dann `LLAMA_MMPROJ` manuell in `.env` setzen.
+- **MTP-Erkennung:** enthält der Modellpfad `MTP` (case-insensitive), wird
+  `LLAMA_MTP=true` gesetzt → llama-server startet zusätzlich mit
+  `--spec-type draft-mtp` (Multi-Token-Prediction-Spekulation aus den im
+  Modell enthaltenen MTP-Tensoren, kein separates Draft-Modell nötig).
+  Sonst `LLAMA_MTP=false`.
+
+`scripts/llm-entrypoint.sh` baut daraus die tatsächliche `llama-server`-Kommandozeile
+(`--model`, optional `--mmproj`, optional `--spec-type draft-mtp`, plus die
+statischen Flags wie `--ctx-size`, `--flash-attn`, `--parallel` etc.).
+
+## Neue LLM-Modelle suchen & herunterladen
 
 ```bash
-pip3 install --user huggingface_hub   # einmalig
+# .gguf-Dateien eines HF-Repos mit Größe auflisten (optional nach Substring filtern)
+scripts/hf-model.sh search llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF
+scripts/hf-model.sh search llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF Q4_K
 
-# Modelle suchen (vorquantisierte GGUF von lmstudio-community)
-hf models list --author lmstudio-community --filter gguf --sort downloads --limit 20 --format quiet
+# Datei herunterladen — landet automatisch unter
+# ~/.lmstudio/models/<repo>/<datei> (gleiche Struktur wie LM Studio)
+scripts/hf-model.sh download llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF \
+  Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-Q4_K_S.gguf
 
-# Datei laden
-hf download lmstudio-community/Qwen3.5-27B-GGUF Qwen3.5-27B-Q4_K_M.gguf \
-  --local-dir ~/.lmstudio/models/lmstudio-community/Qwen3.5-27B-GGUF
-
-# Direkt aktivieren
-scripts/switch-model.sh /models/lmstudio-community/Qwen3.5-27B-GGUF/Qwen3.5-27B-Q4_K_M.gguf
+# Direkt aktivieren (mmproj/MTP werden automatisch erkannt, siehe oben)
+scripts/switch-model.sh /models/llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-Q4_K_S.gguf
 ```
+
+`hf-model.sh` nutzt die HF-API (`curl`/`jq`) zum Suchen und `hf download`
+(huggingface_hub, `pip3 install --user huggingface_hub`) zum Laden.
+
+⚠️ **Quant-Format beachten:** Nur Standard-ggml-Quants (`Q4_K_M`, `Q4_K_S`,
+`IQ4_XS`, `IQ4_NL`, …) funktionieren mit dem `ggml-org/llama.cpp`-Image.
+Quants wie `IQ4_KS`, `IQ2_KT` etc. (ik_llama.cpp-Erweiterungen, höhere
+ggml-Type-IDs) schlagen beim Laden fehl
+(`invalid ggml type ... should be in [0, 42)`).
 
 **Quantisierungs-Richtwert für 32 GB VRAM:**
 

@@ -14,34 +14,13 @@ services:
       - "11434:11434"
     volumes:
       - ${LMSTUDIO_MODELS}:/models:ro
-    command:
-      - --model
-      - ${LLAMA_MODEL}
-      - --alias
-      - current
-      - --mmproj
-      - /models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/mmproj-Qwen3.5-35B-A3B-BF16.gguf
-      - --n-gpu-layers
-      - "99"
-      - --split-mode
-      - layer
-      - --ctx-size
-      - "${LLAMA_CTX}"
-      - --host
-      - 0.0.0.0
-      - --port
-      - "11434"
-      - --parallel
-      - "2"
-      - -ngl
-      - 99
-      - -t
-      - 6
-      - -tb
-      - 6
-      - --flash-attn
-      - "on"
-
+      - ./scripts/llm-entrypoint.sh:/llm-entrypoint.sh:ro
+    environment:
+      - LLAMA_MODEL=${LLAMA_MODEL}
+      - LLAMA_MMPROJ=${LLAMA_MMPROJ}
+      - LLAMA_CTX=${LLAMA_CTX}
+      - LLAMA_MTP=${LLAMA_MTP}
+    entrypoint: ["/llm-entrypoint.sh"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:11434/health || exit 1"]
