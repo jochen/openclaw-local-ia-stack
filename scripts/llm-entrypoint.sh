@@ -21,7 +21,7 @@ ARGS+=(
   --ctx-size "${LLAMA_CTX}"
   --host 0.0.0.0
   --port 11434
-  --parallel 2
+  --parallel "${LLAMA_PARALLEL:-1}"
   -ngl 99
   -t 6
   -tb 6

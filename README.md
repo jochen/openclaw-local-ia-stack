@@ -45,7 +45,7 @@ Modell. Wechsel via `scripts/switch-model.sh` (recreate des llm-Containers, ~30 
 
 | Dienst | Image | Port | Notes |
 |---------|-------|------|-------|
-| `llm` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | 11434 | OpenAI-kompatibel, layer-split (`--split-mode layer`), `--parallel 2`, Flash-Attention, multimodal via `--mmproj` |
+| `llm` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | 11434 | OpenAI-kompatibel, layer-split (`--split-mode layer`), `--parallel ${LLAMA_PARALLEL}` (Default 1), Flash-Attention, optional multimodal via `--mmproj`, optional MTP via `--spec-type draft-mtp` |
 | `embeddings` | `michaelf34/infinity:latest` | 11435 | nomic-embed-text-v1.5, 768 dims, CPU-only, `--url-prefix=/v1` |
 | `speaches` | `ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda` | 8000 | STT (faster-whisper/ctranslate2, int8 CUDA), TTS (Piper/ONNX), Diarization; dynamische GPU-Wahl beim Start |
 | `speaches-warmup` | `alpine` | — | One-shot: lädt STT/TTS-Modelle wenn speaches healthy ist, beendet sich danach |
@@ -57,13 +57,14 @@ Honcho-, PostgreSQL- und Redis-Dienste sind in `compose.yml` auskommentiert (s. 
 ## VRAM-Budget
 
 ```
-~22 GB  llm (Qwen3.5-35B-A3B-Q4_K_M, layer-split auf beide GPUs, LLAMA_CTX=65536)
-          GPU0: ~12.3 GB   GPU1: ~10.5 GB
+~21 GB  llm (Qwen3.6-27B-Q4_K_S + mmproj + MTP, layer-split auf beide GPUs,
+          LLAMA_CTX=65536, LLAMA_PARALLEL=1 → n_ctx=65536)
+          GPU0: ~11.9 GB   GPU1: ~12.7 GB
 ~0.4 GB  speaches (Whisper int8 + Piper) — auf GPU1 (meiste freie VRAM beim Start)
 ~0.6 GB  ser (wav2vec2-large, fp16) — GPU1 (gepinnt via CUDA_VISIBLE_DEVICES=1)
 ~0.0 GB  embeddings (CPU-only)
 ──────────────────────────────────────────────────────────────
-~23.7 GB / 32 GB belegt  →  ~8.3 GB frei (GPU0 ~3.3 GB, GPU1 ~4.6 GB)
+~24.6 GB / 32 GB belegt  →  ~7.7 GB frei (GPU0 ~4.2 GB, GPU1 ~3.5 GB)
 ```
 
 > **Der KV-Cache ist die größte Stellschraube.** `LLAMA_CTX` bestimmt die
@@ -71,6 +72,13 @@ Honcho-, PostgreSQL- und Redis-Dienste sind in `compose.yml` auskommentiert (s. 
 > `262144` auf `65536` hat ~6 GB freigemacht — genug, um auf GPU1 (~5 GB frei)
 > einen zusätzlichen Sprach-Analyse-/SER-Dienst zu betreiben. Bei Bedarf weiter
 > senken.
+>
+> **`n_ctx` pro Slot = `LLAMA_CTX` / `LLAMA_PARALLEL`.** Der KV-Cache-Verbrauch
+> hängt nur von `LLAMA_CTX` ab, nicht von `LLAMA_PARALLEL` (kv-unified) — bei
+> `LLAMA_PARALLEL=1` bekommt eine einzelne Session den vollen `LLAMA_CTX` ohne
+> zusätzlichen VRAM-Bedarf, dafür kann nur 1 Request gleichzeitig bedient werden.
+> Mit `LLAMA_PARALLEL=2` würde sich `LLAMA_CTX=65536` auf 2× 32768 pro Slot
+> aufteilen.
 >
 > **GPU-Wechsel beim Recreate:** Ein `--force-recreate` des llm-Containers kann an
 > einem inaktiven `nvidia-persistenced` scheitern (CDI verlangt

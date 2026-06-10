@@ -20,6 +20,7 @@ services:
       - LLAMA_MMPROJ=${LLAMA_MMPROJ}
       - LLAMA_CTX=${LLAMA_CTX}
       - LLAMA_MTP=${LLAMA_MTP}
+      - LLAMA_PARALLEL=${LLAMA_PARALLEL}
     entrypoint: ["/llm-entrypoint.sh"]
     restart: unless-stopped
     healthcheck:
