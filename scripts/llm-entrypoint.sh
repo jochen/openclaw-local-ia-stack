@@ -5,6 +5,22 @@ set -e
 # Erlaubt das Wechseln von Modell/mmproj/Kontextgröße/MTP-Spekulation
 # ohne compose.yml anpassen zu müssen (siehe scripts/switch-model.sh).
 
+# Router-Mode: wenn LLAMA_PRESETS gesetzt ist, verwaltet llama-server mehrere
+# Modelle aus der INI-Datei und lädt/entlädt sie bei Bedarf (LRU, --models-max).
+# Modellname im Request = INI-Sektionsname. Alle Modell-Parameter stehen
+# dann in der Preset-Datei, die LLAMA_MODEL/LLAMA_CTX/...-Vars gelten NICHT.
+if [ -n "${LLAMA_PRESETS}" ]; then
+  ARGS=(
+    --models-preset "${LLAMA_PRESETS}"
+    --models-max "${LLAMA_MODELS_MAX:-1}"
+    --host 0.0.0.0
+    --port 11434
+  )
+  echo "llm-entrypoint: starte llama-server im ROUTER-MODE mit:"
+  printf '  %s\n' "${ARGS[@]}"
+  exec /app/llama-server "${ARGS[@]}"
+fi
+
 ARGS=(
   --model "${LLAMA_MODEL}"
   --alias current
@@ -27,6 +43,16 @@ ARGS+=(
   -tb 6
   --flash-attn on
 )
+
+# KV-Cache-Quantisierung: spart ~50% KV-VRAM (q8_0 statt f16) und erlaubt
+# damit größere Kontexte. Braucht Flash-Attention (oben aktiv).
+# Achtung: mit quantisiertem KV-Cache funktioniert Context-Shift nicht.
+if [ -n "${LLAMA_CACHE_K}" ]; then
+  ARGS+=( --cache-type-k "${LLAMA_CACHE_K}" )
+fi
+if [ -n "${LLAMA_CACHE_V}" ]; then
+  ARGS+=( --cache-type-v "${LLAMA_CACHE_V}" )
+fi
 
 # Multi-Token-Prediction (MTP) Spekulationsdecoding: nur aktivieren,
 # wenn LLAMA_MTP=true/1 gesetzt ist. Nutzt die im Hauptmodell

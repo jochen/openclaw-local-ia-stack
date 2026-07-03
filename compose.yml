@@ -15,12 +15,17 @@ services:
     volumes:
       - ${LMSTUDIO_MODELS}:/models:ro
       - ./scripts/llm-entrypoint.sh:/llm-entrypoint.sh:ro
+      - ./llm-presets.ini:/llm-presets.ini:ro
     environment:
       - LLAMA_MODEL=${LLAMA_MODEL}
       - LLAMA_MMPROJ=${LLAMA_MMPROJ}
       - LLAMA_CTX=${LLAMA_CTX}
       - LLAMA_MTP=${LLAMA_MTP}
       - LLAMA_PARALLEL=${LLAMA_PARALLEL}
+      - LLAMA_CACHE_K=${LLAMA_CACHE_K}
+      - LLAMA_CACHE_V=${LLAMA_CACHE_V}
+      - LLAMA_PRESETS=${LLAMA_PRESETS}
+      - LLAMA_MODELS_MAX=${LLAMA_MODELS_MAX}
     entrypoint: ["/llm-entrypoint.sh"]
     restart: unless-stopped
     healthcheck:
@@ -40,7 +45,7 @@ services:
       - ${HF_CACHE}:/app/.cache/huggingface
     command:
       - v2
-      - --model-id=nomic-ai/nomic-embed-text-v1.5
+      - --model-id=BAAI/bge-m3
       - --port=7997
       - --url-prefix=/v1
     restart: unless-stopped
@@ -92,86 +97,6 @@ services:
         wget -qO- --post-data='' "http://speaches:8000/v1/models/$TTS_MODEL"
         echo "Speaches models ready."
     restart: "no"
-
-#  # ── Honcho ───────────────────────────────────────────────────────────────────
-#  honcho-api:
-#    build:
-#      context: ../honcho-fork
-#      dockerfile: Dockerfile
-#    container_name: honcho-api
-#    entrypoint: ["sh", "docker/entrypoint.sh"]
-#    depends_on:
-#      database:
-#        condition: service_healthy
-#      redis:
-#        condition: service_healthy
-#      llm:
-#        condition: service_started
-#    ports:
-#      - "9000:8000"
-#    env_file:
-#      - ../honcho-fork/.env
-#    environment:
-#      - DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@database:5432/postgres
-#      - CACHE_URL=redis://redis:6379/0?suppress=true
-#      - CACHE_ENABLED=true
-#    restart: unless-stopped
-#
-#  honcho-deriver:
-#    build:
-#      context: ../honcho-fork
-#      dockerfile: Dockerfile
-#    container_name: honcho-deriver
-#    entrypoint: ["/app/.venv/bin/python", "-m", "src.deriver"]
-#    depends_on:
-#      database:
-#        condition: service_healthy
-#      redis:
-#        condition: service_healthy
-#      llm:
-#        condition: service_started
-#    env_file:
-#      - ../honcho-fork/.env
-#    environment:
-#      - DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@database:5432/postgres
-#      - CACHE_URL=redis://redis:6379/0?suppress=true
-#      - CACHE_ENABLED=true
-#    restart: unless-stopped
-#
-#  # ── Infrastructure ───────────────────────────────────────────────────────────
-#  database:
-#    image: docker.io/pgvector/pgvector:pg15
-#    container_name: honcho-db
-#    restart: unless-stopped
-#    ports:
-#      - "127.0.0.1:5432:5432"
-#    command: ["postgres", "-c", "max_connections=200"]
-#    environment:
-#      - POSTGRES_DB=postgres
-#      - POSTGRES_USER=postgres
-#      - POSTGRES_PASSWORD=postgres
-#      - PGDATA=/var/lib/postgresql/data/pgdata
-#    volumes:
-#      - pgdata:/var/lib/postgresql/data/
-#    healthcheck:
-#      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
-#      interval: 5s
-#      timeout: 5s
-#      retries: 5
-#
-#  redis:
-#    image: docker.io/redis:8.2
-#    container_name: honcho-redis
-#    restart: unless-stopped
-#    ports:
-#      - "127.0.0.1:6379:6379"
-#    volumes:
-#      - redis-data:/data
-#    healthcheck:
-#      test: ["CMD-SHELL", "redis-cli ping"]
-#      interval: 5s
-#      timeout: 5s
-#      retries: 5
 
   # ── SER – Speech Emotion Recognition (GPU1, wav2vec2-large) ─────────────────
   ser:
