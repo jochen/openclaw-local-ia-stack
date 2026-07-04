@@ -30,23 +30,27 @@ wav2vec2-large auf GPU). Alle sprechen OpenAI-kompatible oder eigene REST-APIs.
 ```
 Clients (OpenClaw, Voice-Assistant, Coding-Tools, …)
          │
-         ├─ :11434  llm          — LLM-Inferenz (llama-server), layer-split über beide GPUs
-         ├─ :11435  embeddings   — nomic-embed-text-v1.5 (768 dims), CPU
+         ├─ :11434  llm          — LLM-Inferenz (llama-server, Router-Mode), layer-split über beide GPUs
+         ├─ :11435  embeddings   — BAAI/bge-m3 (1024 dims, multilingual), GPU
          ├─ :8000   speaches     — Speech: STT / TTS / Diarization, auf der GPU mit meiste freier VRAM
          ├─ :8001   voice-analysis — Sprach-Analyse (CPU-only); /mood nutzt intern den ser-Dienst
          └─ :8002   ser          — Speech Emotion Recognition (GPU1, wav2vec2-large, fp16)
 ```
 
-**Ein großes Modell zur Zeit:** Bei 32 GB VRAM und einem ~24 GB-LLM passt nur ein
-großes Modell gleichzeitig. Der API-Alias `current` zeigt immer auf das geladene
-Modell. Wechsel via `scripts/switch-model.sh` (recreate des llm-Containers, ~30 s).
+**Ein großes Modell zur Zeit, Wechsel per Request (Router-Mode):** Bei 32 GB VRAM
+passt nur ein großes LLM gleichzeitig. Der llm-Container läuft im llama-server
+**Router-Mode** (`--models-preset llm-presets.ini`, `--models-max 1`): Der
+Modellname im API-Request (`"model": "qwen" | "gemma" | "ornith"`) wählt das
+Modell; ist ein anderes geladen, wird es automatisch entladen und das angefragte
+mit seinen Preset-Einstellungen geladen (~20 s, LRU). Der Alias `current` zeigt
+aus Kompatibilitätsgründen auf `qwen`. Siehe „Weitere Modelle hinzufügen".
 
 ## Dienste
 
 | Dienst | Image | Port | Notes |
 |---------|-------|------|-------|
-| `llm` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | 11434 | OpenAI-kompatibel, layer-split (`--split-mode layer`), `--parallel ${LLAMA_PARALLEL}` (Default 1), Flash-Attention, optional multimodal via `--mmproj`, optional MTP via `--spec-type draft-mtp` |
-| `embeddings` | `michaelf34/infinity:latest` | 11435 | nomic-embed-text-v1.5, 768 dims, CPU-only, `--url-prefix=/v1` |
+| `llm` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | 11434 | OpenAI-kompatibel, **Router-Mode** (Modelle aus `llm-presets.ini`, on-demand-Swap), layer-split, Flash-Attention, KV-Cache q8_0, multimodal via `mmproj`, MTP wo verfügbar |
+| `embeddings` | `michaelf34/infinity:latest` | 11435 | BAAI/bge-m3, 1024 dims, multilingual, GPU (~1,6 GB VRAM), `--url-prefix=/v1` |
 | `speaches` | `ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda` | 8000 | STT (faster-whisper/ctranslate2, int8 CUDA), TTS (Piper/ONNX), Diarization; dynamische GPU-Wahl beim Start |
 | `speaches-warmup` | `alpine` | — | One-shot: lädt STT/TTS-Modelle wenn speaches healthy ist, beendet sich danach |
 | `ser` | `./ser` (Build) | 8002 | **GPU1** (CUDA_VISIBLE_DEVICES=1, fp16); `POST /ser` (WAV → arousal/valence/dominance + label); Modell: `audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim` (~600 MiB VRAM) |
@@ -57,28 +61,28 @@ Honcho-, PostgreSQL- und Redis-Dienste sind in `compose.yml` auskommentiert (s. 
 ## VRAM-Budget
 
 ```
-~21 GB  llm (Qwen3.6-27B-Q4_K_S + mmproj + MTP, layer-split auf beide GPUs,
-          LLAMA_CTX=65536, LLAMA_PARALLEL=1 → n_ctx=65536)
-          GPU0: ~11.9 GB   GPU1: ~12.7 GB
-~0.4 GB  speaches (Whisper int8 + Piper) — auf GPU1 (meiste freie VRAM beim Start)
+~25 GB  llm (variiert je Modell; Beispiel qwen: Q4_K_S + mmproj + MTP,
+          ctx 131072 mit q8_0-KV-Cache, layer-split auf beide GPUs)
+          GPU0: ~12.4 GB   GPU1: ~12.3 GB
+~0.4 GB  speaches (Whisper int8 + Piper) — GPU1
 ~0.6 GB  ser (wav2vec2-large, fp16) — GPU1 (gepinnt via CUDA_VISIBLE_DEVICES=1)
-~0.0 GB  embeddings (CPU-only)
+~1.6 GB  embeddings (bge-m3, GPU1)
 ──────────────────────────────────────────────────────────────
-~24.6 GB / 32 GB belegt  →  ~7.7 GB frei (GPU0 ~4.2 GB, GPU1 ~3.5 GB)
+Regel: ~10 % pro GPU frei lassen (max. ~14.7 GB belegt je GPU).
+GPU1 ist wegen der Dauer-Dienste meist der Engpass.
 ```
 
-> **Der KV-Cache ist die größte Stellschraube.** `LLAMA_CTX` bestimmt die
-> KV-Cache-Größe und damit den Löwenanteil der VRAM-Belegung. Das Absenken von
-> `262144` auf `65536` hat ~6 GB freigemacht — genug, um auf GPU1 (~5 GB frei)
-> einen zusätzlichen Sprach-Analyse-/SER-Dienst zu betreiben. Bei Bedarf weiter
-> senken.
+> **Der KV-Cache ist die größte Stellschraube.** `ctx-size` (pro Preset-Sektion
+> in `llm-presets.ini`) bestimmt die KV-Cache-Größe und damit den Löwenanteil
+> der variablen VRAM-Belegung. Mit `cache-type-k/v = q8_0` halbiert sich der
+> KV-Bedarf gegenüber f16 (Qualitätsverlust vernachlässigbar; Context-Shift
+> funktioniert damit nicht). Achtung: SWA-/Hybrid- und MoE-Modelle skalieren
+> ihren KV-Cache nicht linear mit ctx — immer messen statt rechnen.
 >
-> **`n_ctx` pro Slot = `LLAMA_CTX` / `LLAMA_PARALLEL`.** Der KV-Cache-Verbrauch
-> hängt nur von `LLAMA_CTX` ab, nicht von `LLAMA_PARALLEL` (kv-unified) — bei
-> `LLAMA_PARALLEL=1` bekommt eine einzelne Session den vollen `LLAMA_CTX` ohne
+> **`n_ctx` pro Slot = `ctx-size` / `parallel`.** Der KV-Cache-Verbrauch
+> hängt nur von `ctx-size` ab, nicht von `parallel` (kv-unified) — bei
+> `parallel = 1` bekommt eine einzelne Session den vollen Kontext ohne
 > zusätzlichen VRAM-Bedarf, dafür kann nur 1 Request gleichzeitig bedient werden.
-> Mit `LLAMA_PARALLEL=2` würde sich `LLAMA_CTX=65536` auf 2× 32768 pro Slot
-> aufteilen.
 >
 > **GPU-Wechsel beim Recreate:** Ein `--force-recreate` des llm-Containers kann an
 > einem inaktiven `nvidia-persistenced` scheitern (CDI verlangt
@@ -116,37 +120,73 @@ podman compose up -d
 Beim allerersten Start dauert der erste STT-Aufruf ~50 s (CUDA-JIT für Blackwell
 sm120). Ab dem zweiten Start greift `speaches-cuda-cache` → alle Aufrufe < 0.5 s.
 
-## Modell wechseln
+## Modelle & Wechsel (Router-Mode)
+
+Die Modelle stehen in **`llm-presets.ini`** (INI-Keys = llama-server-CLI-Optionen
+ohne führende Bindestriche; `[*]` = globale Defaults; Sektionsname = Modellname
+im API-Request). Der Wechsel passiert **automatisch per Request** — kein Skript,
+kein Restart:
 
 ```bash
-# Auf ein anderes Modell wechseln (recreate des llm-Containers, ~30 s)
-scripts/switch-model.sh /models/lmstudio-community/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf
-
-# Lokal verfügbare Modelle durchsuchen (rein lesend, kein Switch/Restart)
-scripts/switch-model.sh search Q4_K_S
-
-# Aktuelles Modell + mmproj + MTP-Status + verfügbare Modelle anzeigen
-scripts/switch-model.sh
+curl http://localhost:11434/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model": "ornith", "messages": [{"role": "user", "content": "Hi"}]}'
+# → entlädt das aktuelle Modell, lädt ornith mit seinen Preset-Settings (~20 s)
 ```
 
-`switch-model.sh` schreibt `LLAMA_MODEL` in `.env` und recreate-t den llm-Container.
-Modelle liegen lokal als GGUF unter `~/.lmstudio/models/`, im Container unter `/models/`.
+Aktuelles Set (Stand 2026-07-03, Messwerte siehe `llm-presets.ini`-Kommentare):
 
-Beim Wechsel passiert zusätzlich automatisch:
-- **mmproj-Erkennung:** das Verzeichnis des neuen Modells wird nach `*mmproj*.gguf`
-  durchsucht. Bei genau einem Treffer wird `LLAMA_MMPROJ` in `.env` entsprechend
-  gesetzt (multimodale/Vision-Unterstützung über `--mmproj`). Bei keinem Treffer
-  wird `LLAMA_MMPROJ` geleert (kein `--mmproj`-Flag). Bei mehreren Treffern wird
-  nichts geändert — dann `LLAMA_MMPROJ` manuell in `.env` setzen.
-- **MTP-Erkennung:** enthält der Modellpfad `MTP` (case-insensitive), wird
-  `LLAMA_MTP=true` gesetzt → llama-server startet zusätzlich mit
-  `--spec-type draft-mtp` (Multi-Token-Prediction-Spekulation aus den im
-  Modell enthaltenen MTP-Tensoren, kein separates Draft-Modell nötig).
-  Sonst `LLAMA_MTP=false`.
+| Name | Modell | ctx | MTP | Speed |
+|------|--------|-----|-----|-------|
+| `qwen` (Alias `current`) | Qwen3.6-27B heretic Q4_K_S | 131072 | nativ (`spec-type`) | ~30–40 t/s |
+| `gemma` | gemma-4-31B-it heretic Q4_K_M | 65536 | Drafter-GGUF (`model-draft`) | ~32 t/s |
+| `ornith` | Ornith-35B heretic Q4_K_M (MoE A3B) | 131072 | — (MoE ist so schnell) | ~113 t/s |
 
-`scripts/llm-entrypoint.sh` baut daraus die tatsächliche `llama-server`-Kommandozeile
-(`--model`, optional `--mmproj`, optional `--spec-type draft-mtp`, plus die
-statischen Flags wie `--ctx-size`, `--flash-attn`, `--parallel` etc.).
+Alle drei sind Reasoning-Modelle (Antwort in `reasoning_content` + `content` —
+`max_tokens` großzügig setzen). `/v1/models` listet zusätzlich ein Pseudo-Modell
+`default`; ignorieren. Clients: Timeouts ≥ 60 s wegen Swap-Latenz.
+
+**Fallback Single-Model-Modus:** `LLAMA_PRESETS=` in `.env` leeren → der alte
+Pfad über `LLAMA_MODEL`/`LLAMA_CTX`/… und `scripts/switch-model.sh` greift wieder.
+
+## Weitere Modelle hinzufügen
+
+Checkliste (so wurden gemma/ornith am 2026-07-03 eingerichtet):
+
+1. **GGUF finden & laden.** `scripts/hf-model.sh search <repo>` zeigt Dateien
+   und Größen, `scripts/hf-model.sh download <repo> <datei>` lädt nach
+   `~/.lmstudio/models/<repo>/` (im Container `/models/<repo>/`). Quant-Wahl:
+   Q4_K_M als Default; Weights-Datei + ~2–8 GB (KV+Compute) muss unter das
+   VRAM-Budget passen (s.u.). **Achtung:** ik_llama-Quants (IQ4_KS, IQ2_KT, …)
+   lädt das mainline-Image nicht ("invalid ggml type"). mmproj-Datei (Vision)
+   aus demselben Repo mitladen, falls vorhanden.
+2. **MTP prüfen** (Speed ~1,5–3×, nur bei Dense-Modellen relevant):
+   - *Qwen3.6-style (nativ):* GGUF muss „MTP-Preserved" sein (MTP-Tensoren
+     enthalten) → nur `spec-type = draft-mtp` setzen.
+   - *Gemma-4-style (Drafter):* separates kleines Drafter-GGUF nötig (z. B.
+     `unsloth/<modell>-GGUF` Ordner `MTP/`, ~0,5 GB) → `model-draft = <pfad>`
+     **und** `spec-type = draft-mtp`. Funktioniert auch mit abliterierten
+     Targets (gemessen: ~90 % Acceptance).
+   - *MoE-A3B-Modelle:* MTP meist unnötig — wenige aktive Parameter sind auch
+     so schnell (ornith: 113 t/s).
+   - Nach dem Einrichten `draft_n_accepted/draft_n` in der API-Response prüfen:
+     unter ~40 % Acceptance bremst MTP eher → wieder entfernen.
+3. **Preset-Sektion in `llm-presets.ini` anlegen.** Muster: `model`, ggf.
+   `mmproj`, `ctx-size` (konservativ starten, z. B. 32768), `cache-type-k` /
+   `cache-type-v` = `q8_0` (halbiert KV-VRAM; Context-Shift geht damit nicht).
+   Globales (ngl, flash-attn, threads, parallel) erbt aus `[*]`.
+4. **Aktivieren:** `~/.local/bin/podman-compose up -d --force-recreate llm`
+   (ohne `--force-recreate` ignoriert podman-compose die Änderung!).
+5. **VRAM vermessen & ctx maximieren.** Modell per Request laden, dann
+   `nvidia-smi --query-gpu=index,memory.used --format=csv`. Regel: **~10 %
+   pro GPU frei lassen** (max. ~14,7 GB belegt). GPU1 trägt zusätzlich
+   dauerhaft bge-m3 (~1,6 GB) + speaches (~0,4 GB). ctx schrittweise erhöhen
+   und erneut messen — **nicht rechnen**: SWA-/Hybrid-Modelle (Qwen3.x,
+   Gemma) und MoE skalieren ihren KV-Cache nicht linear mit ctx
+   (gemessen: qwen +2,1 GB, ornith +0,36 GB pro GPU je +32k).
+6. **Funktionstest** über beide Namen (`/v1/models`, Chat-Request) und
+   **dokumentieren**: Messwerte als Kommentar in die INI-Sektion; Drawer im
+   MemPalace (Wing `user-a520-aorus-elite-home-user-ai-stack`); OpenClaw-Configs
+   ergänzen, wenn das Modell dort wählbar sein soll.
 
 ## Neue LLM-Modelle suchen & herunterladen
 
@@ -160,8 +200,8 @@ scripts/hf-model.sh search llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP
 scripts/hf-model.sh download llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF \
   Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-Q4_K_S.gguf
 
-# Direkt aktivieren (mmproj/MTP werden automatisch erkannt, siehe oben)
-scripts/switch-model.sh /models/llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-Q4_K_S.gguf
+# Aktivieren: Sektion in llm-presets.ini anlegen (siehe „Weitere Modelle
+# hinzufügen"), dann: ~/.local/bin/podman-compose up -d --force-recreate llm
 ```
 
 `hf-model.sh` nutzt die HF-API (`curl`/`jq`) zum Suchen und `hf download`
