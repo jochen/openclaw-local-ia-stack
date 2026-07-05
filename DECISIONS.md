@@ -234,14 +234,29 @@ observed 150K configuration) without pre-allocating all of it.
 
 ---
 
-## speaches: dynamic GPU selection
+## speaches: fixed GPU assignment (was: dynamic selection)
 
-`scripts/speaches-entrypoint.sh` detects the GPU with the most free VRAM at
-container startup and sets `CUDA_VISIBLE_DEVICES` accordingly. This way
-speaches doesn't compete with the LLM for GPU memory on a fixed GPU, but
-adapts to whatever is available when the stack starts.
+**Superseded 2026-07-05.** The original approach — `speaches-entrypoint.sh`
+picks the GPU with the most free VRAM at container startup — broke once the
+LLM presets moved to ctx 131072: the choice is made *once at start*, but the
+LLM loads lazily *afterwards* and fills whichever GPU speaches picked.
+Result: `CUDA out of memory` when Whisper loaded on first transcription →
+HTTP 500 in the voice assistant. The "~200 MB VRAM" assumption was also
+wrong: faster-whisper-medium int8 needs ~1.2 GB resident (with
+`WHISPER__TTL=-1`), plus ~1.5 GB peak during ctranslate2 model load.
 
-speaches uses ~200 MB VRAM — negligible compared to the LLM.
+**Current design:** GPU1 is the *service GPU* with a fixed budget:
+SER (wav2vec2-large fp16, ~1.6 GB) + Whisper (~1.2 GB) + speaches/piper
+(~0.5 GB) ≈ 3.3 GB. speaches is pinned via `SPEACHES_GPU=1` (compose.yml →
+entrypoint honors it; dynamic selection remains as fallback if unset).
+The LLM is shifted toward GPU0 via `tensor-split = 59,41` in
+`llm-presets.ini` `[*]`, capping its GPU1 share at ~12 GB. Verified with
+gemma/qwen/ornith at ctx 131072: STT/TTS/SER/voice-analysis all pass while
+the LLM is loaded. bge-m3 (infinity) turned out to run on CPU anyway and
+needs no GPU budget.
+
+Note: gemma's preset is text-only now (mmproj costs 1.1 GB it no longer
+has); vision requests use the `[gemma-vision]` preset (ctx 65536 + MTP).
 
 ---
 

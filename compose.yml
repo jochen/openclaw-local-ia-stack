@@ -63,7 +63,13 @@ services:
     environment:
       - WHISPER__INFERENCE_DEVICE=cuda
       - WHISPER__COMPUTE_TYPE=int8
-      - WHISPER__TTL=-1
+      # TTL: in speaches 0.9.0-rc.3 top-level STT_MODEL_TTL/TTS_MODEL_TTL;
+      # das fruehere WHISPER__TTL wird stillschweigend ignoriert (whisper.ttl
+      # existiert im Config-Schema nicht mehr). -1 = nie entladen.
+      - STT_MODEL_TTL=-1
+      - TTS_MODEL_TTL=-1
+      # GPU1 = Service-GPU (wie ser); llm laesst dort per tensor-split Platz
+      - SPEACHES_GPU=1
       - CUDA_CACHE_PATH=/home/ubuntu/.cache/cuda
     volumes:
       - speaches-cache:/home/ubuntu/.cache/huggingface/hub
@@ -80,7 +86,9 @@ services:
       start_period: 20s
 
   speaches-warmup:
-    image: alpine
+    # curl-Image statt alpine: busybox-wget kann kein multipart/form-data,
+    # das die Mini-Transkription unten braucht.
+    image: quay.io/curl/curl:latest
     container_name: speaches-warmup
     depends_on:
       speaches:
@@ -88,14 +96,28 @@ services:
     environment:
       - STT_MODEL=guillaumekln/faster-whisper-medium
       - TTS_MODEL=speaches-ai/piper-de_DE-thorsten-medium
+      - TTS_VOICE=de_DE-thorsten-medium
+    entrypoint: ["/bin/sh"]
     command:
-      - sh
       - -c
       - |
-        echo "Loading STT: $STT_MODEL"
-        wget -qO- --post-data='' "http://speaches:8000/v1/models/$STT_MODEL"
-        echo "Loading TTS: $TTS_MODEL"
-        wget -qO- --post-data='' "http://speaches:8000/v1/models/$TTS_MODEL"
+        echo "Registering STT: $STT_MODEL"
+        curl -s -X POST "http://speaches:8000/v1/models/$STT_MODEL" || true
+        echo "Registering TTS: $TTS_MODEL"
+        curl -s -X POST "http://speaches:8000/v1/models/$TTS_MODEL" || true
+        # Mini-TTS + Mini-Transkription: laedt piper und whisper wirklich
+        # ins VRAM (POST /v1/models registriert nur). So beansprucht
+        # speaches sein GPU1-Budget schon beim Stack-Start, bevor das LLM
+        # laedt - nicht erst bei der ersten echten Voice-Anfrage.
+        echo "Warmup TTS (piper -> VRAM)"
+        curl -sf -X POST http://speaches:8000/v1/audio/speech \
+          -H "Content-Type: application/json" \
+          -d "{\"model\":\"$TTS_MODEL\",\"voice\":\"$TTS_VOICE\",\"input\":\"Aufwärmen.\",\"response_format\":\"wav\"}" \
+          -o /tmp/warmup.wav
+        echo "Warmup STT (whisper -> VRAM)"
+        curl -sf -X POST http://speaches:8000/v1/audio/transcriptions \
+          -F "file=@/tmp/warmup.wav" -F "model=$STT_MODEL" -F "language=de"
+        echo ""
         echo "Speaches models ready."
     restart: "no"
 
