@@ -63,6 +63,7 @@ services:
     environment:
       - WHISPER__INFERENCE_DEVICE=cuda
       - WHISPER__COMPUTE_TYPE=int8
+      - WHISPER__TTL=-1
       - CUDA_CACHE_PATH=/home/ubuntu/.cache/cuda
     volumes:
       - speaches-cache:/home/ubuntu/.cache/huggingface/hub
