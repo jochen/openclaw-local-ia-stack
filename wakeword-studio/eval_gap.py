@@ -43,8 +43,9 @@ def count_gap(above, need):
             hits = 0; gap_used = False
     return c + (1 if hits >= need else 0)
 
-print(f"{'Thr':>5} {'3 strikt':>9} {'2 strikt':>9} {'3 mit 1-Gap':>12}   (FP/h)")
-for thr in (0.3, 0.35, 0.4):
+print(f"{'Thr':>5} {'3 strikt':>9} {'2 strikt':>9} {'3 mit 1-Gap':>12} {'2 mit 1-Gap':>12}   (FP/h auf %.1f h)" % hours)
+for thr in (0.2, 0.25, 0.3, 0.35, 0.4):
     above = s > thr
     print(f"{thr:>5} {count_strict(above,3)/hours:>9.2f} "
-          f"{count_strict(above,2)/hours:>9.2f} {count_gap(above,3)/hours:>12.2f}")
+          f"{count_strict(above,2)/hours:>9.2f} {count_gap(above,3)/hours:>12.2f} "
+          f"{count_gap(above,2)/hours:>12.2f}")
