@@ -133,17 +133,45 @@ curl http://localhost:11434/v1/chat/completions -H 'Content-Type: application/js
 # → entlädt das aktuelle Modell, lädt ornith mit seinen Preset-Settings (~20 s)
 ```
 
-Aktuelles Set (Stand 2026-07-03, Messwerte siehe `llm-presets.ini`-Kommentare):
+Aktuelles Set, **`full`-Modus** (Stand 2026-07-09, Messwerte siehe
+`llm-presets.ini`-Kommentare):
 
 | Name | Modell | ctx | MTP | Speed |
 |------|--------|-----|-----|-------|
-| `qwen` (Alias `current`) | Qwen3.6-27B heretic Q4_K_S | 131072 | nativ (`spec-type`) | ~30–40 t/s |
-| `gemma` | gemma-4-31B-it heretic Q4_K_M | 65536 | Drafter-GGUF (`model-draft`) | ~32 t/s |
-| `ornith` | Ornith-35B heretic Q4_K_M (MoE A3B) | 131072 | — (MoE ist so schnell) | ~113 t/s |
+| `qwen` (Alias `current`) | Qwen3.6-27B heretic Q4_K_S + mmproj | 131072 | nativ (`spec-type`) | ~30–40 t/s |
+| `gemma` | gemma-4-31B-it heretic Q4_K_M + mmproj | 131072 | — (Drafter passt bei 131072 nicht mehr) | ~20 t/s |
+| `ornith` | Ornith-35B heretic Q4_K_M (MoE A3B) + mmproj | 131072 | — (MoE ist so schnell) | ~113 t/s |
 
 Alle drei sind Reasoning-Modelle (Antwort in `reasoning_content` + `content` —
 `max_tokens` großzügig setzen). `/v1/models` listet zusätzlich ein Pseudo-Modell
 `default`; ignorieren. Clients: Timeouts ≥ 60 s wegen Swap-Latenz.
+
+### Zwei ctx-Profile: `llm-presets.ini.full` / `.compact`
+
+`llm-presets.ini` ist die **live** Datei, die der `llm`-Container mountet —
+llama-server liest sie nur beim Start (kein Live-Reload), ein reiner
+Datei-Edit wirkt also erst nach `--force-recreate`. Es gibt zwei fertige
+Varianten im Repo, geschaltet über `scripts/voice-stack.sh` (siehe
+[Stack-Verwaltung](#stack-verwaltung)):
+
+- **`llm-presets.ini.full`** — ctx 131072 überall, mmproj überall, kein
+  `tensor-split`. Braucht fast das komplette VRAM beider GPUs (siehe
+  VRAM-Budget) → nur wenn speaches/ser/voice-analysis **gestoppt** sind.
+- **`llm-presets.ini.compact`** — ctx 65536, globales `tensor-split = 59,41`
+  (verschiebt LLM-Last Richtung GPU0), gemma ohne mmproj (dafür eigenes
+  `[gemma-vision]`-Preset bei ctx 65536) → lässt GPU1 genug Reserve für die
+  Sprach-Pipeline nebenher.
+
+```bash
+scripts/voice-stack.sh stop   # Sprach-Pipeline aus + llm -> full  (131072, mmproj)
+scripts/voice-stack.sh start  # llm -> compact (65536, GPU1-Reserve) + Sprach-Pipeline an
+scripts/voice-stack.sh status # Container-Status + aktives ctx-Preset + GPU-VRAM
+```
+
+Manuell auf ein drittes Preset wechseln (z.B. eigene Datei): Preset-Datei nach
+`llm-presets.ini` kopieren, dann `~/.local/bin/podman-compose up -d
+--force-recreate llm` (ohne `--force-recreate` ignoriert podman-compose die
+Änderung).
 
 **Fallback Single-Model-Modus:** `LLAMA_PRESETS=` in `.env` leeren → der alte
 Pfad über `LLAMA_MODEL`/`LLAMA_CTX`/… und `scripts/switch-model.sh` greift wieder.
@@ -272,6 +300,22 @@ podman ps                       # laufende Container
 podman logs -f llm              # Logs
 podman exec speaches nvidia-smi # VRAM (Host-nvidia-smi ggf. kaputt)
 ```
+
+**VRAM für llm freimachen:** `scripts/voice-stack.sh` schaltet speaches, ser
+und voice-analysis zusammen mit dem llm-ctx-Profil um (embeddings bleibt
+davon unberührt, läuft immer durch):
+
+```bash
+scripts/voice-stack.sh stop   # Sprach-Pipeline aus, llm -> full (ctx 131072 + mmproj überall)
+scripts/voice-stack.sh start  # llm -> compact (ctx 65536, GPU1-Reserve), danach Sprach-Pipeline an
+scripts/voice-stack.sh status # Container-Status + aktives ctx-Preset + GPU-VRAM
+```
+
+`stop`/`start` recreaten dabei immer den `llm`-Container (auch wenn das
+Preset scheinbar schon passt) — llama-server liest `llm-presets.ini` nur beim
+eigenen Start, ein reiner Datei-Edit ohne Recreate hätte keine Wirkung.
+restart-policy aller Container ist `unless-stopped`: manuell gestoppte
+Container bleiben gestoppt, kein Auto-Restart außer bei Host-Reboot.
 
 ## Hinweise
 
