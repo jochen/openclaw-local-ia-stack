@@ -340,3 +340,40 @@ models in `/v1/models` immediately without falling back.
 
 The model list (`STT_MODEL`, `TTS_MODEL`) lives in `compose.yml` under
 `speaches-warmup.environment` — change it there to use different models.
+
+---
+
+## rouven: Speech-Stack ausgelagert (speaches + ser + voice-analysis)
+
+Um GPU1 auf diesem Host (126) komplett dem LLM zu überlassen (VRAM-Konflikte,
+siehe Speaches-TTL-Eintrag oben), laufen `speaches`, `ser` und `voice-analysis`
+testweise auf einem zweiten Fablab-Rechner ("rouven", 192.168.111.229, GTX 1660
+6GB). Config: `compose.rouven.yml` (gleiche `./ser` und `./voice-analysis`
+Build-Contexts wie hier, deshalb im selben Verzeichnis statt in einem
+Unterordner). Umschaltbar über `switch-audio-stack.sh` im
+`openclaw_voice_assist`-Repo.
+
+**Setup-Voraussetzungen auf einem neuen Host (Ubuntu 24.04, rootless Podman):**
+- `nvidia-container-toolkit` MUSS auf 1.16.x gepinnt werden (`apt-get install
+  --allow-downgrades nvidia-container-toolkit=1.16.2-1 ...`). Ab 1.17+ generiert
+  `nvidia-ctk cdi generate` ein `additionalGids`-Feld, das podman 4.9.3 (Ubuntu
+  24.04 Standard) nicht parsen kann → "unresolvable CDI devices". Downgrade
+  erzeugt kompatibles CDI ohne das Feld.
+- `loginctl enable-linger <user>` ist Pflicht — ohne Linger sterben
+  rootless-Podman-Container beim Ende der SSH-Session (hängen dann in
+  "Stopping" fest, `podman system migrate` + `podman rm -f` + `podman network
+  prune -f` nötig zum Aufräumen).
+
+**GPU-Kompatibilität (kritisch!):** Die GTX 1660 hat keine Tensor Cores (im
+Gegensatz zur RTX 5060 Ti hier). `WHISPER__COMPUTE_TYPE=int8` oder `float16`
+liefern auf dieser Karte STILLSCHWEIGEND falschen Text — keine Fehlermeldung,
+kein Crash, nur plausibel klingende Halluzinationen (int8) bzw. Garbage-Tokens
+(float16). Nur mit CPU-Fallback-Vergleich (identische Audiodatei, einmal
+`WHISPER__INFERENCE_DEVICE=cpu`) auffindbar. Fix: `WHISPER__COMPUTE_TYPE=float32`
+— langsamer (RTF ~0.78 statt ~0.13), aber korrekt. VRAM-Verbrauch mit `ser`
+zusammen: ~4.2/6GB, noch Puffer.
+
+**Diarization-Modelle** (`fedirz/segmentation_community_1` +
+`Wespeaker/wespeaker-voxceleb-resnet34-LM`) müssen wie STT/TTS explizit über
+`speaches-warmup` registriert werden, sonst 404 "not installed locally" beim
+ersten `/v1/audio/diarization`-Aufruf. In `compose.rouven.yml` ergänzt.

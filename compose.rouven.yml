@@ -1,0 +1,119 @@
+name: ai-stack-rouven
+
+services:
+
+  # ── Speech AI ────────────────────────────────────────────────────────────────
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda
+    container_name: speaches
+    devices:
+      - nvidia.com/gpu=all
+    security_opt:
+      - label=disable
+    ports:
+      - "8000:8000"
+    environment:
+      # GTX 1660 hat keine Tensor Cores (im Gegensatz zu RTX 5060 Ti auf 126) -
+      # int8/float16 CTranslate2-Kernel liefern auf dieser GPU stillschweigend
+      # falschen Text (Whisper-Halluzination bzw. Garbage-Output), verifiziert
+      # 2026-07-08. float32 ist bisher die einzige verifiziert korrekte GPU-Option.
+      - WHISPER__INFERENCE_DEVICE=cuda
+      - WHISPER__COMPUTE_TYPE=float32
+      - STT_MODEL_TTL=-1
+      - TTS_MODEL_TTL=-1
+      - CUDA_CACHE_PATH=/home/ubuntu/.cache/cuda
+    volumes:
+      - speaches-cache:/home/ubuntu/.cache/huggingface/hub
+      - speaches-cuda-cache:/home/ubuntu/.cache/cuda
+      - ./scripts/speaches-entrypoint.sh:/speaches-entrypoint.sh:ro
+      - ./patches/onnx_diarization_pipeline.py:/home/ubuntu/speaches/.venv/lib/python3.12/site-packages/onnx_diarization/pipeline.py:ro
+    entrypoint: ["/speaches-entrypoint.sh"]
+    command: ["uvicorn", "--factory", "speaches.main:create_app"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  speaches-warmup:
+    image: quay.io/curl/curl:latest
+    container_name: speaches-warmup
+    depends_on:
+      speaches:
+        condition: service_healthy
+    environment:
+      - STT_MODEL=guillaumekln/faster-whisper-medium
+      - TTS_MODEL=speaches-ai/piper-de_DE-thorsten-medium
+      - TTS_VOICE=de_DE-thorsten-medium
+      - DIARIZATION_SEGMENTATION_MODEL=fedirz/segmentation_community_1
+      - DIARIZATION_EMBEDDING_MODEL=Wespeaker/wespeaker-voxceleb-resnet34-LM
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        echo "Registering STT: $STT_MODEL"
+        curl -s -X POST "http://speaches:8000/v1/models/$STT_MODEL" || true
+        echo "Registering TTS: $TTS_MODEL"
+        curl -s -X POST "http://speaches:8000/v1/models/$TTS_MODEL" || true
+        echo "Registering Diarization: $DIARIZATION_SEGMENTATION_MODEL"
+        curl -s -X POST "http://speaches:8000/v1/models/$DIARIZATION_SEGMENTATION_MODEL" || true
+        echo "Registering Diarization: $DIARIZATION_EMBEDDING_MODEL"
+        curl -s -X POST "http://speaches:8000/v1/models/$DIARIZATION_EMBEDDING_MODEL" || true
+        echo "Warmup TTS (piper -> VRAM)"
+        curl -sf -X POST http://speaches:8000/v1/audio/speech \
+          -H "Content-Type: application/json" \
+          -d "{\"model\":\"$TTS_MODEL\",\"voice\":\"$TTS_VOICE\",\"input\":\"Aufwärmen.\",\"response_format\":\"wav\"}" \
+          -o /tmp/warmup.wav
+        echo "Warmup STT (whisper -> VRAM)"
+        curl -sf -X POST http://speaches:8000/v1/audio/transcriptions \
+          -F "file=@/tmp/warmup.wav" -F "model=$STT_MODEL" -F "language=de"
+        echo ""
+        echo "Speaches models ready."
+    restart: "no"
+
+  # ── SER – Speech Emotion Recognition (wav2vec2-large) ────────────────────────
+  ser:
+    build:
+      context: ./ser
+    container_name: ser
+    devices:
+      - nvidia.com/gpu=all
+    security_opt:
+      - label=disable
+    ports:
+      - "0.0.0.0:8002:8002"
+    volumes:
+      - ${HF_CACHE}:/root/.cache/huggingface
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # ── Voice Analysis (CPU-only, Audio-Analyse + SER-backed Stimmung) ───────────
+  voice-analysis:
+    build:
+      context: ./voice-analysis
+    container_name: voice-analysis
+    ports:
+      - "0.0.0.0:8001:8001"
+    depends_on:
+      speaches:
+        condition: service_healthy
+      ser:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  speaches-cache:
+  speaches-cuda-cache:
