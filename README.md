@@ -1,5 +1,14 @@
 # openclaw-local-ai-stack
 
+> ⚠️ **Archiviert (2026-07-24).** Dieses Repo ist in zwei Nachfolge-Repos
+> aufgeteilt worden, weil die Dienste inzwischen auf drei getrennten Hosts mit
+> unterschiedlicher Rolle laufen:
+> - [openclaw-fablab-llm](https://github.com/jochen/openclaw-fablab-llm) — LLM + Embeddings (192.168.111.126)
+> - [openclaw-voice-stack](https://github.com/jochen/openclaw-voice-stack) — speaches/ser/voice-analysis (rouven, gastonllm)
+>
+> Volle Historie/Entscheidungen bis zum Split bleiben hier erhalten, wird
+> aber nicht mehr aktiv gepflegt.
+
 Lokaler AI-Stack für [OpenClaw](https://openclaw.ai) — läuft vollständig on-premise
 über Podman Compose auf einem einzelnen Dual-GPU-Host.
 
